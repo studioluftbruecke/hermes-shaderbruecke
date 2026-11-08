@@ -1,0 +1,6 @@
+{
+  "name": "shaderbruecke",
+  "label": "Shaderbrücke",
+  "tab": { "hidden": true },
+  "api": "plugin_api.py"
+}

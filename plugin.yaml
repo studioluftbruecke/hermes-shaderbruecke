@@ -1,0 +1,19 @@
+name: shaderbruecke
+version: "0.1.0"
+description: "Shaderbrücke: make, check, tune and export GLSL shaders with your Hermes agent. The agent writes the shader, a headless Chromium on the host lints, compiles and renders it, the agent looks at its own frames and fixes them, Desktop plays the result live with sliders, and the exports (three.js, R3F, TSL, Shadertoy, agent handoff) carry a frame-by-frame proof."
+author: "Studio Luftbrücke"
+license: MIT
+requires_hermes: ">=0.22.7"
+provides_tools:
+  - shader_render
+  - shader_library
+  - shader_export
+config_schema:
+  allow_project_writes:
+    type: boolean
+    default: false
+    description: "Allow shader_export to copy files into dest_dir during unattended runs (cron, webhook, single query)."
+  credit_line:
+    type: boolean
+    default: true
+    description: "Append the 'Made with Shaderbruecke' line to every export header."

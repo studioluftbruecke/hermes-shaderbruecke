@@ -1,0 +1,110 @@
+// Three.js Transpiler r187
+
+import { time, screenSize, screenCoordinate, vec3, uniform, vec2, fract, dot, Fn, floor, mul, sub, mix, float, Loop, property, uv, clamp, pow, sin, add, length, smoothstep, exp, vec4 } from 'three/tsl';
+
+// Polyfills
+
+const iTime = time;
+const iResolution = screenSize;
+const fragCoord = vec3( screenCoordinate.x, screenSize.y.sub( screenCoordinate.y ), screenCoordinate.z );
+const sunHeight = uniform( 'float' );
+const cloudCover = uniform( 'float' );
+const warmth = uniform( 'float' );
+
+// Golden-hour sky, Shadertoy conventions (single Image pass, no channels).
+// A warm vertical gradient, a low sun with a wide glow, and slow cloud bands.
+// Everything is a pure function of fragCoord and iTime, so a frame at t = 1 s is reproducible.
+// @slider sunHeight 0.05..0.95 = 0.32 step 0.01
+// @slider cloudCover 0.0..1.0 = 0.55 step 0.01
+// @slider warmth 0.0..1.0 = 0.75 step 0.01
+
+export const hash21 = /*@__PURE__*/ Fn( ( [ p_immutable ] ) => {
+
+	const p = p_immutable.toVar();
+	p.assign( fract( p.mul( vec2( 123.34, 456.21 ) ) ) );
+	p.addAssign( dot( p, p.add( 45.32 ) ) );
+
+	return fract( p.x.mul( p.y ) );
+
+}, { p: 'vec2', return: 'float' } );
+
+export const valueNoise = /*@__PURE__*/ Fn( ( [ p ] ) => {
+
+	const i = floor( p );
+	const f = fract( p );
+	const u = f.mul( f ).mul( sub( 3.0, mul( 2.0, f ) ) );
+	const a = hash21( i );
+	const b = hash21( i.add( vec2( 1.0, 0.0 ) ) );
+	const c = hash21( i.add( vec2( 0.0, 1.0 ) ) );
+	const d = hash21( i.add( vec2( 1.0, 1.0 ) ) );
+
+	return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
+
+}, { p: 'vec2', return: 'float' } );
+
+export const fbm = /*@__PURE__*/ Fn( ( [ p_immutable ] ) => {
+
+	const p = p_immutable.toVar();
+	const sum = float( 0.0 );
+	const amp = float( 0.5 );
+
+	Loop( 5, () => {
+
+		sum.addAssign( amp.mul( valueNoise( p ) ) );
+		p.mulAssign( 2.03 );
+		amp.mulAssign( 0.5 );
+
+	} );
+
+	return sum;
+
+}, { p: 'vec2', return: 'float' } );
+
+export const mainImage = /*@__PURE__*/ Fn( () => {
+
+	const fragColor = property( 'vec4' );
+	const uv = fragCoord.div( iResolution.xy );
+	const horizon = float( 0.46 );
+
+	// Sky gradient: deep blue overhead, warm haze at the horizon.
+
+	const zenith = vec3( 0.09, 0.16, 0.36 );
+	const haze = mix( vec3( 0.95, 0.62, 0.35 ), vec3( 1.0, 0.82, 0.52 ), warmth );
+	const h = clamp( uv.y.sub( horizon ).div( sub( 1.0, horizon ) ), 0.0, 1.0 );
+	const col = mix( haze, zenith, pow( h, 0.75 ) );
+
+	// The sun: a disc plus a two-scale glow.
+
+	const sunPos = vec2( add( 0.5, mul( 0.18, sin( iTime.mul( 0.05 ) ) ) ), horizon.add( sunHeight.mul( 0.42 ) ) );
+	const d = length( uv.sub( sunPos ).mul( vec2( iResolution.x.div( iResolution.y ), 1.0 ) ) );
+
+	// Edges always ascending: GLSL leaves smoothstep undefined when edge0 > edge1, and the TSL
+	// renderer draws such a frame black.
+
+	const disc = sub( 1.0, smoothstep( 0.046, 0.052, d ) );
+	const glow = mul( 0.55, exp( - 26.0.mul( d ) ) ).add( mul( 0.22, exp( - 6.0.mul( d ) ) ) );
+	const sunColour = mix( vec3( 1.0, 0.93, 0.72 ), vec3( 1.0, 0.72, 0.36 ), warmth );
+	col.addAssign( sunColour.mul( disc.mul( 1.4 ).add( glow ) ) );
+
+	// Clouds: two drifting layers, thinning with cloudCover.
+
+	const drift = iTime.mul( 0.015 );
+	const q = vec2( uv.x.mul( 3.4 ).add( drift ), uv.y.mul( 6.0 ).sub( drift.mul( 0.6 ) ) );
+	const cloud = fbm( q.add( fbm( q.mul( 0.7 ) ).mul( 0.6 ) ) );
+	cloud.assign( smoothstep( 0.52, 0.86, cloud ).mul( smoothstep( 0.02, 0.30, uv.y.sub( horizon ).add( 0.08 ) ) ) );
+	const cover = cloud.mul( cloudCover );
+	const cloudColour = mix( vec3( 0.42, 0.40, 0.50 ), vec3( 1.0, 0.74, 0.58 ), smoothstep( 0.0, 0.5, uv.y.sub( horizon ) ) );
+	col.assign( mix( col, cloudColour, cover.mul( 0.85 ) ) );
+
+	// Ground haze: a dark band that grounds the sky.
+
+	col.assign( mix( col, vec3( 0.10, 0.08, 0.11 ), sub( 1.0, smoothstep( horizon.sub( 0.10 ), horizon, uv.y ) ) ) );
+
+	// Filmic-ish tone curve keeps the sun from clipping to flat white.
+
+	col.assign( col.div( col.add( vec3( 0.85 ) ) ) );
+	fragColor.assign( vec4( pow( col, vec3( 1.0 / 2.2 ) ), 1.0 ) );
+
+	return fragColor;
+
+} );

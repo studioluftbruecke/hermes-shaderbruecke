@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "note": "One table for the Python lint (checks.py) and the Desktop half (desktop/plugin.js). A rule needs a triggering sample and a clean sample in tests/test_lint.py, so adding a rule here without samples fails the suite.",
+  "rules": [
+    {
+      "id": "while-true",
+      "kind": "regex",
+      "pattern": "\\bwhile\\s*\\(\\s*(?:true|1)\\s*\\)",
+      "severity": "error",
+      "message": "`while (true)` cannot be bounded by the compiler and hangs the GPU",
+      "hint": "use `for (int i = 0; i < CONSTANT; i++)` with a constant bound instead"
+    },
+    {
+      "id": "for-bound",
+      "kind": "for_bound",
+      "severity": "error",
+      "message": "this `for` loop has no constant upper bound",
+      "hint": "use a constant upper bound, e.g. `for (int i = 0; i < 32; i++)` or a `const int STEPS = 32;`"
+    },
+    {
+      "id": "float-counter",
+      "kind": "regex",
+      "pattern": "\\bfor\\s*\\(\\s*float\\b",
+      "severity": "warn",
+      "message": "a float loop counter accumulates rounding error and can miss its exit",
+      "hint": "count with an `int` and divide inside the body"
+    },
+    {
+      "id": "webgl1",
+      "kind": "regex",
+      "pattern": "\\b(?:texture2D|gl_FragColor|gl_FragData|varying|attribute)\\b",
+      "severity": "error",
+      "message": "this is a WebGL1 GLSL ES 1.00 name; the shader is compiled as GLSL ES 3.00",
+      "hint": "`texture2D` -> `texture`, `gl_FragColor` -> the `fragColor` argument, `varying` -> `in`/`out`, `attribute` -> `in`"
+    },
+    {
+      "id": "redeclare",
+      "kind": "regex",
+      "pattern": "#version|\\bprecision[ \\t]+(?:lowp|mediump|highp)|\\buniform[ \\t]+\\w+[ \\t]+(?:iTime|iResolution|iMouse|iFrame|iDate|iTimeDelta)\\b",
+      "severity": "error",
+      "message": "`#version`, `precision` and the i* uniforms are injected by the renderer; declaring them again fails to compile",
+      "hint": "delete the declaration and use the uniform as it is"
+    },
+    {
+      "id": "own-main",
+      "kind": "regex",
+      "pattern": "\\bvoid[ \\t]+main[ \\t]*\\(",
+      "severity": "error",
+      "message": "the renderer supplies `main()`; a second one is a redefinition",
+      "hint": "write `void mainImage(out vec4 fragColor, in vec2 fragCoord)` only"
+    }
+  ]
+}
