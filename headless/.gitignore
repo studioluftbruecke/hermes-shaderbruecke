@@ -1,0 +1,2 @@
+# Runtime output never belongs in the plugin folder.
+.run/

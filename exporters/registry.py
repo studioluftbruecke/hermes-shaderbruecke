@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from . import handoff, r3f, shadertoy, three, tsl
+from . import handoff, isf, r3f, shadertoy, td, three, tsl
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ EXPORT_TARGETS: dict[str, ExportTarget] = {
         main_file="{name}.handoff.md",
         files=handoff.files,
         steps=handoff.steps,
-        proof="identity",
+        proof="embedded-three",
         status="stable",
     ),
     "shadertoy": ExportTarget(
@@ -67,8 +67,28 @@ EXPORT_TARGETS: dict[str, ExportTarget] = {
         main_file="{name}.shadertoy.glsl",
         files=shadertoy.files,
         steps=shadertoy.steps,
-        proof="identity",
+        proof="shadertoy-harness",
         status="stable",
+    ),
+    # Both host targets stay experimental until the real-host check (P11): the shims model each
+    # host's wrapper, not its compiler (TouchDesigner's GLSL 4.60 on Vulkan, VDMX's Metal path).
+    "td": ExportTarget(
+        id="td",
+        label="TouchDesigner GLSL TOP (pixel shader)",
+        main_file="{name}.td.glsl",
+        files=td.files,
+        steps=td.steps,
+        proof="td-shim",
+        status="experimental",
+    ),
+    "isf": ExportTarget(
+        id="isf",
+        label="ISF 2.0 generator (VDMX, Resolume Wire)",
+        main_file="{name}.fs",
+        files=isf.files,
+        steps=isf.steps,
+        proof="isf-shim",
+        status="experimental",
     ),
 }
 

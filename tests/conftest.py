@@ -32,3 +32,15 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "chromium" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def attended_session(monkeypatch):
+    """Every test runs as an attended session unless it sets the signals itself.
+
+    The test runner may itself run inside a cron job or a gateway session, and the unattended
+    rule would then refuse writes the test expects.
+    """
+    for name in ("HERMES_CRON_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_SINGLE_QUERY_SESSION",
+                 "HERMES_PLUGIN_HOST_PROCESS"):
+        monkeypatch.delenv(name, raising=False)

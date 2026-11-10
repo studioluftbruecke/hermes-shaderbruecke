@@ -16,6 +16,8 @@ runs: the network stays blocked, the page loads its vendored modules from disk.
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -121,6 +123,8 @@ return out;
 
 # The M2 bundle: three frames for the contact sheet, a float pass for a NaN verdict, and a
 # one-second scan that only returns numbers (the flash verdict is computed in Python).
+# The expression only installs `window.__sbBundle`; Python then calls its steps one by one
+# (compile, frames, flash), so a deadline always knows which phase was running.
 _BUNDLE_JS = """(() => {
 const CFG = __CFG__;
 function compile(gl, type, src) {
@@ -176,6 +180,17 @@ function stats(px) {
   }
   const mean = sum / n;
   return [Math.round(mean * 1000) / 1000, Math.round(Math.sqrt(Math.max(0, sum2 / n - mean * mean)) * 1000) / 1000];
+}
+// Share of pixels whose luminance moved more than 2/255 since the previous frame. Whole-frame
+// statistics miss drift: clouds that slide sideways keep the mean and spread unchanged.
+function movedShare(a, b) {
+  let moved = 0;
+  for (let i = 0; i < b.length; i += 4) {
+    const ya = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+    const yb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+    if (Math.abs(ya - yb) > 2) moved++;
+  }
+  return Math.round((moved / (b.length / 4)) * 10000) / 10000;
 }
 function srgbToLinear(c) {
   c /= 255;
@@ -237,9 +252,13 @@ function sheet(frames, W, H, columns, cellW) {
 }
 
 const out = { status: 'ok', frames: [], times: CFG.times };
+const state = {};
+window.__sbBundle = {
+compile() {
 const main = build(CFG.width, CFG.height);
 if (main === null) { out.status = 'no_webgl2'; return out; }
 if (main.error) { out.status = 'compile_error'; out.compile_log = main.error; return out; }
+state.main = main;
 const dbg = main.gl.getExtension('WEBGL_debug_renderer_info');
 out.renderer = dbg ? main.gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : main.gl.getParameter(main.gl.RENDERER);
 
@@ -257,7 +276,12 @@ if (main.gl.getExtension('EXT_color_buffer_float')) {
   if (main.gl.checkFramebufferStatus(main.gl.FRAMEBUFFER) !== main.gl.FRAMEBUFFER_COMPLETE) floatFb = null;
   main.gl.bindFramebuffer(main.gl.FRAMEBUFFER, null);
 }
+state.floatFb = floatFb;
+return { status: out.status, renderer: out.renderer };
+},
 
+frames() {
+const main = state.main, floatFb = state.floatFb;
 const pixelFrames = [];
 const drawTimes = [];
 for (const t of CFG.times) {
@@ -280,6 +304,7 @@ for (const t of CFG.times) {
     main.gl.bindFramebuffer(main.gl.FRAMEBUFFER, null);
   }
   out.frames.push({ t, luma_mean: mean, luma_std: std, nan_fraction: nanFraction,
+                    moved: pixelFrames.length ? movedShare(pixelFrames[pixelFrames.length - 1], px) : null,
                     png: toPng(px, main.w, main.h), draw_ms: drawMs });
   pixelFrames.push(px);
   drawTimes.push(drawMs);
@@ -287,8 +312,11 @@ for (const t of CFG.times) {
 
 out.contact_sheet = sheet(pixelFrames, CFG.width, CFG.height, 3, CFG.sheet_cell || 384);
 out.draw_ms = Math.round((drawTimes.reduce((a, b) => a + b, 0) / drawTimes.length) * 10) / 10;
+return { status: out.status };
+},
 
 // One second of small frames: luminance and saturated-red share per frame, numbers only.
+flash() {
 const flash = build(CFG.flash_width, CFG.flash_height);
 if (flash === null || flash.error) {
   out.status = 'flash_error';
@@ -306,6 +334,25 @@ for (let i = 0; i < CFG.flash_frames; i++) {
 }
 out.flash = { lumas: luma, reds: red, fps: CFG.flash_fps };
 return out;
+},
+
+// The library thumbnail (F36): the t = 1 s frame with the given slider values, drawn into a small
+// 2D canvas and encoded as WebP in this session (P15), so no PNG round trip is needed.
+thumb() {
+const main = state.main;
+setTime(main, CFG.thumb_time);
+main.gl.drawArrays(main.gl.TRIANGLES, 0, 3);
+const small = document.createElement('canvas');
+small.width = CFG.thumb_width; small.height = CFG.thumb_height;
+const ctx = small.getContext('2d');
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'high';
+ctx.drawImage(main.gl.canvas, 0, 0, small.width, small.height);
+out.thumb = small.toDataURL('image/webp', CFG.thumb_quality);
+return out;
+}
+};
+return true;
 })()"""
 
 _DIAG_RE = re.compile(r"^(ERROR|WARNING): (\d+):(\d+): (.*)$")
@@ -333,6 +380,8 @@ class RenderResult:
     luma_std: float | None = None
     renderer: str | None = None
     detail: str | None = None
+    phase: str | None = None          # set on a timeout: start | compile | frames | flash | render
+    slot_wait_ms: int = 0             # time spent waiting for a free Chromium slot
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -343,13 +392,16 @@ class BundleResult:
     status: str
     compile_log: str = ""
     errors: list[Diagnostic] = field(default_factory=list)
-    frames: list[dict] = field(default_factory=list)   # {t, png_path, luma_mean, luma_std, nan_fraction}
+    frames: list[dict] = field(default_factory=list)   # {t, png_path, luma_mean, luma_std, nan_fraction, moved}
     contact_sheet: str | None = None
+    thumb: str | None = None                            # thumb.webp path (F36)
     flash: dict = field(default_factory=dict)
     draw_ms: float | None = None
     wall_ms: int | None = None
     renderer: str | None = None
     detail: str | None = None
+    phase: str | None = None          # set on a timeout: start | compile | frames | flash
+    slot_wait_ms: int = 0             # time spent waiting for a free Chromium slot
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -357,6 +409,106 @@ class BundleResult:
 
 class _Deadline(Exception):
     pass
+
+
+class _Busy(Exception):
+    pass
+
+
+# At most this many Chromium children per profile at once. Tool calls and dashboard routes run in
+# different processes, so the limit is a set of lock files, not a counter in memory.
+MAX_CHILDREN = 2
+SLOT_WAIT_S = 120.0
+_SLOT_DIR: contextvars.ContextVar[Path | None] = contextvars.ContextVar("shaderbruecke_slots",
+                                                                       default=None)
+
+
+@contextlib.contextmanager
+def chromium_slots(directory: Path | str):
+    """Count Chromium children against the lock files in `directory` for this block.
+
+    Callers pass a folder under the profile's data dir, so the limit is per profile. Without one,
+    a per-user folder in the system temp dir is used.
+    """
+    token = _SLOT_DIR.set(Path(directory))
+    try:
+        yield
+    finally:
+        _SLOT_DIR.reset(token)
+
+
+def _slot_dir() -> Path:
+    chosen = _SLOT_DIR.get()
+    if chosen is not None:
+        return chosen
+    return Path(tempfile.gettempdir()) / f"shaderbruecke-chromium-{os.getuid()}"
+
+
+@contextlib.contextmanager
+def _slot():
+    """Hold one of `MAX_CHILDREN` lock files; yields the milliseconds spent waiting."""
+    directory = _slot_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    while True:
+        for index in range(MAX_CHILDREN):
+            fd = os.open(directory / f"chromium-{index}.lock",
+                         os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                continue
+            try:
+                yield int((time.monotonic() - started) * 1000)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            return
+        if time.monotonic() - started >= SLOT_WAIT_S:
+            raise _Busy(f"{MAX_CHILDREN} renders were already running for this profile at once "
+                        f"and none finished within {SLOT_WAIT_S:g} s; try again in a moment")
+        time.sleep(0.1)
+
+
+def free_slots(directory: Path | str) -> int:
+    """How many of the `MAX_CHILDREN` Chromium slots in `directory` are free right now (each is
+    tried without waiting and released at once). The Lab's save answers `busy` at 0 instead of
+    waiting up to `SLOT_WAIT_S` inside a request."""
+    folder = Path(directory)
+    folder.mkdir(parents=True, exist_ok=True)
+    free = 0
+    for index in range(MAX_CHILDREN):
+        fd = os.open(folder / f"chromium-{index}.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            free += 1
+        except BlockingIOError:
+            pass
+        finally:
+            os.close(fd)
+    return free
+
+
+_PHASE_HINTS = {
+    "start": "the browser did not start or load its page in time; the host may be busy, try again",
+    "compile": ("the shader did not compile in time; very long unrolled loops or deep function "
+                "nesting make the driver slow"),
+    "frames": ("drawing the frames did not finish; most likely an unbounded or very long loop "
+               "(use constant loop bounds) or too much work per pixel"),
+    "flash": ("the flash scan (one second of small frames) did not finish; the shader is too slow "
+              "per frame"),
+    "render": ("the render did not finish; most likely an unbounded or very long loop (use "
+               "constant loop bounds)"),
+    "proof": "the proof renders did not finish; the export or the source is too slow per frame",
+    "thumb": "drawing the thumbnail frame did not finish; the shader is too slow per frame",
+}
+
+
+def timeout_detail(phase: str, timeout_s: float) -> str:
+    hint = _PHASE_HINTS.get(phase, f"the {phase} step did not finish")
+    return f"timed out after {timeout_s:g} s in the {phase} phase: {hint}"
 
 
 def find_chromium() -> str | None:
@@ -377,17 +529,40 @@ def find_chromium() -> str | None:
 
 
 # The only variables Chromium inherits. The gateway's environment holds every profile's API keys
-# and tokens; none of them may reach the browser process. TMPDIR must stay the host's: Chromium
-# crashes at start (SIGTRAP) when TMPDIR is its own user-data-dir.
-_INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR")
+# and tokens; none of them may reach the browser process. TMPDIR must not be the user-data-dir
+# itself: Chromium crashes at start (SIGTRAP) when it is.
+_INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+
+# Chromium keeps a Unix socket under TMPDIR and under the profile; a socket path over ~107 bytes
+# makes it exit at start. Hermes points TMPDIR into the profile home, which can be long.
+MAX_TEMP_BASE = 60
+
+
+# Chromium starts through a one-line /bin/sh launcher: posix_spawn cannot change directory or limits.
+# The child runs inside its throwaway profile (HOME) with core dumps off, so a crash never drops a
+# core file into the gateway's working directory. fds 3/4 are already in place when sh starts, and
+# `exec` keeps them, so no redirection with fds above 9 is needed.
+_LAUNCHER = "/bin/sh"
+_LAUNCH_SCRIPT = 'ulimit -c 0 2>/dev/null; cd "$HOME" || exit 1; exec "$0" "$@"'
+
+
+def short_temp_base() -> str:
+    """The host temp dir when its path is short, else the first short writable fallback."""
+    candidates = [os.environ.get("TMPDIR", ""), tempfile.gettempdir(), "/tmp", "/var/tmp", "/dev/shm"]
+    for candidate in candidates:
+        if candidate and len(candidate) <= MAX_TEMP_BASE and os.path.isdir(candidate) \
+                and os.access(candidate, os.W_OK):
+            return candidate
+    return tempfile.gettempdir()
 
 
 def child_env(profile_dir: str) -> dict[str, str]:
-    """Environment for the Chromium child: lookup, locale and temp-dir variables only, with the
+    """Environment for the Chromium child: lookup and locale variables, a short temp dir, and the
     throwaway profile as HOME so the browser writes no dotfiles into the real home."""
     env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     env.setdefault("LANG", "C.UTF-8")
+    env["TMPDIR"] = short_temp_base()
     env["HOME"] = profile_dir
     return env
 
@@ -479,12 +654,26 @@ class _Child:
         self.cdp: _Pipe | None = None
         self._cmd_w = self._res_r = -1
         self.started = time.monotonic()
+        self.phase = "start"
+        self.slot_wait_ms = 0
+        self._slot: contextlib.ExitStack | None = None
 
     def __enter__(self) -> "_Child":
         if not self.chrome:
             raise FileNotFoundError("no Chromium found (set SHADERBRUECKE_CHROMIUM)")
+        self._slot = contextlib.ExitStack()
+        # Raises _Busy when every slot stays taken; the deadline starts once a slot is ours.
+        self.slot_wait_ms = self._slot.enter_context(_slot())
+        try:
+            return self._spawn()
+        except BaseException:
+            self._slot.close()
+            self._slot = None
+            raise
+
+    def _spawn(self) -> "_Child":
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.profile = tempfile.mkdtemp(prefix="shaderbruecke-chrome-")
+        self.profile = tempfile.mkdtemp(prefix="shaderbruecke-chrome-", dir=short_temp_base())
         cmd_r, cmd_w = (_high_fd(fd) for fd in os.pipe())
         res_r, res_w = (_high_fd(fd) for fd in os.pipe())
         log_fd = os.open(self.out_dir / "browser.log",
@@ -495,11 +684,16 @@ class _Child:
             "--no-first-run", "--no-default-browser-check", "--disable-extensions",
             "--disable-background-networking", "--disable-component-update", "--disable-default-apps",
             "--disable-sync", "--password-store=basic", "--host-resolver-rules=MAP * ~NOTFOUND",
+            # The resolver rule stops HTTP; WebRTC would still send STUN over UDP to an IP literal.
+            # With no proxy configured, this policy leaves WebRTC no UDP path at all (the
+            # `--force-` spelling some guides use is not a switch in this Chromium and did nothing).
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             *self.extra_args,
             f"--user-data-dir={self.profile}", "about:blank",
         ]
         self.started = time.monotonic()
-        self.pid = os.posix_spawn(self.chrome, argv, child_env(self.profile), setpgroup=0,
+        self.pid = os.posix_spawn(_LAUNCHER, [_LAUNCHER, "-c", _LAUNCH_SCRIPT, *argv],
+                                  child_env(self.profile), setpgroup=0,
                                   file_actions=[
                                       (os.POSIX_SPAWN_OPEN, 0, "/dev/null", os.O_RDONLY, 0),
                                       (os.POSIX_SPAWN_DUP2, log_fd, 1),
@@ -578,6 +772,9 @@ class _Child:
                     pass
         if self.profile:
             shutil.rmtree(self.profile, ignore_errors=True)
+        if self._slot is not None:
+            self._slot.close()
+            self._slot = None
 
 
 def render(source: str, out_dir: Path, *, width: int = 512, height: int = 288, t: float = 1.0,
@@ -587,20 +784,25 @@ def render(source: str, out_dir: Path, *, width: int = 512, height: int = 288, t
     cfg = {"header": HEADER, "footer": FOOTER, "vertex": VERTEX, "source": source,
            "width": width, "height": height, "time": t}
     expression = _PROBE_JS.replace("__CFG__", json.dumps(cfg))
+    child = _Child(out_dir, timeout_s=timeout_s)
+    started = time.monotonic()
     try:
-        with _Child(out_dir, timeout_s=timeout_s) as child:
+        with child:
             started = child.started
             try:
                 session = child.open("about:blank")
+                child.phase = "render"
                 data = child.evaluate(expression, session=session)
             except _Deadline:
-                return RenderResult(
-                    "timeout", wall_ms=int((time.monotonic() - started) * 1000),
-                    detail=(f"the headless render did not finish in {timeout_s:g} s and was killed; "
-                            "most likely an unbounded or very long loop (use constant loop bounds)"))
+                return RenderResult("timeout", wall_ms=int((time.monotonic() - started) * 1000),
+                                    phase=child.phase, slot_wait_ms=child.slot_wait_ms,
+                                    detail=timeout_detail(child.phase, timeout_s))
             except (RuntimeError, OSError, ValueError) as exc:
                 return RenderResult("browser_error", wall_ms=int((time.monotonic() - started) * 1000),
+                                    slot_wait_ms=child.slot_wait_ms,
                                     detail=f"{exc} (see {out_dir / 'browser.log'})")
+    except _Busy as exc:
+        return RenderResult("busy", detail=str(exc), slot_wait_ms=child.slot_wait_ms)
     except FileNotFoundError as exc:
         return RenderResult("no_browser", detail=str(exc))
     except (RuntimeError, OSError, ValueError) as exc:
@@ -610,7 +812,7 @@ def render(source: str, out_dir: Path, *, width: int = 512, height: int = 288, t
         data.get("status", "browser_error"), compile_log=log, errors=parse_log(log),
         draw_ms=data.get("draw_ms"), wall_ms=int((time.monotonic() - started) * 1000),
         luma_mean=data.get("luma_mean"), luma_std=data.get("luma_std"),
-        renderer=data.get("renderer"), detail=data.get("error"))
+        renderer=data.get("renderer"), detail=data.get("error"), slot_wait_ms=child.slot_wait_ms)
     png = data.get("png")
     if result.status == "ok" and isinstance(png, str) and png.startswith("data:image/png;base64,"):
         png_path = out_dir / "frame.png"
@@ -626,12 +828,24 @@ def _write_data_url(data: str, path: Path) -> str | None:
     return None
 
 
+THUMB_SIZE = (320, 180)
+THUMB_QUALITY = 0.8
+THUMB_TIME = 1.0
+THUMB_NAME = "thumb.webp"
+
+
 def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0, 1.0, 2.5),
                   width: int = 512, height: int = 288, flash_frames: int = 61,
                   flash_fps: float = 60.0, sheet_cell: int = 384,
-                  sliders: list[dict] | None = None,
-                  timeout_s: float = 30.0) -> BundleResult:
-    """Three frames plus a contact sheet, a NaN pass and a one-second flash scan, one browser."""
+                  sliders: list[dict] | None = None, values: dict[str, float] | None = None,
+                  timeout_s: float = 30.0,
+                  phases: tuple[str, ...] = ("compile", "frames", "flash", "thumb")) -> BundleResult:
+    """Three frames plus a contact sheet, a NaN pass, a one-second flash scan and the library
+    thumbnail (`thumb.webp`, 320x180 at t = 1 s), one browser.
+
+    The steps run as separate evaluations (compile, frames, flash, thumb), so a timeout names the
+    phase that was running. `values` overrides the sliders' defaults; the thumbnail uses them too.
+    """
     if not find_chromium():
         return BundleResult("no_browser", detail="no Chromium found (set SHADERBRUECKE_CHROMIUM)")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -639,25 +853,45 @@ def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0
     if sliders:
         declarations = "".join(f"uniform float {slider['name']};\n" for slider in sliders)
         header = HEADER.replace("#line 1 1\n", declarations + "#line 1 1\n")
+    slider_values = {slider["name"]: slider["default"] for slider in (sliders or [])}
+    slider_values.update({k: v for k, v in (values or {}).items() if k in slider_values})
     cfg = {"header": header, "footer": FOOTER, "vertex": VERTEX, "source": source,
            "width": width, "height": height, "times": list(times), "sheet_cell": sheet_cell,
            "flash_width": 64, "flash_height": 36, "flash_frames": flash_frames, "flash_fps": flash_fps,
-           "sliders": {slider["name"]: slider["default"] for slider in (sliders or [])}}
+           "sliders": slider_values, "thumb_time": THUMB_TIME, "thumb_width": THUMB_SIZE[0],
+           "thumb_height": THUMB_SIZE[1], "thumb_quality": THUMB_QUALITY}
     expression = _BUNDLE_JS.replace("__CFG__", json.dumps(cfg))
+    child = _Child(out_dir, timeout_s=timeout_s)
+    started = time.monotonic()
+    data: dict = {}
     try:
-        with _Child(out_dir, timeout_s=timeout_s) as child:
+        with child:
             started = child.started
             try:
                 session = child.open("about:blank")
-                data = child.evaluate(expression, session=session)
+                installed = child.evaluate(expression, session=session)
+                if installed is not True:
+                    raise RuntimeError(f"the bundle did not install: {installed}")
+                for phase in phases:
+                    child.phase = phase
+                    step = child.evaluate(f"window.__sbBundle.{phase}()", session=session)
+                    if not isinstance(step, dict):
+                        raise RuntimeError(f"the {phase} step returned {step!r}")
+                    if step.get("status") == "exception":
+                        raise RuntimeError(f"the {phase} step threw: {step.get('error')}")
+                    data = step
+                    if step.get("status") != "ok":
+                        break
             except _Deadline:
-                return BundleResult(
-                    "timeout", wall_ms=int((time.monotonic() - started) * 1000),
-                    detail=(f"the headless render did not finish in {timeout_s:g} s and was killed; "
-                            "most likely an unbounded or very long loop (use constant loop bounds)"))
+                return BundleResult("timeout", wall_ms=int((time.monotonic() - started) * 1000),
+                                    phase=child.phase, slot_wait_ms=child.slot_wait_ms,
+                                    detail=timeout_detail(child.phase, timeout_s))
             except (RuntimeError, OSError, ValueError) as exc:
                 return BundleResult("browser_error", wall_ms=int((time.monotonic() - started) * 1000),
+                                    phase=child.phase, slot_wait_ms=child.slot_wait_ms,
                                     detail=f"{exc} (see {out_dir / 'browser.log'})")
+    except _Busy as exc:
+        return BundleResult("busy", detail=str(exc), slot_wait_ms=child.slot_wait_ms)
     except FileNotFoundError as exc:
         return BundleResult("no_browser", detail=str(exc))
     except (RuntimeError, OSError, ValueError) as exc:
@@ -667,7 +901,8 @@ def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0
     log = (data.get("compile_log") or "").replace("\x00", "").strip()
     result = BundleResult(status, compile_log=log, errors=parse_log(log), draw_ms=data.get("draw_ms"),
                           wall_ms=int((time.monotonic() - started) * 1000),
-                          renderer=data.get("renderer"), detail=data.get("error") or data.get("detail"))
+                          renderer=data.get("renderer"), detail=data.get("error") or data.get("detail"),
+                          slot_wait_ms=child.slot_wait_ms)
     if status != "ok":
         result.flash = data.get("flash") or {}
         return result
@@ -676,41 +911,74 @@ def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0
         frame["png_path"] = png_path
         result.frames.append(frame)
     result.contact_sheet = _write_data_url(data.get("contact_sheet", ""), out_dir / "contact-sheet.png")
+    result.thumb = write_webp(data.get("thumb", ""), out_dir / THUMB_NAME)
     result.flash = data.get("flash") or {}
     return result
 
 
+def write_webp(data: str, path: Path) -> str | None:
+    """Write a `data:image/webp` URL; None for anything else (a browser without a WebP encoder
+    answers `toDataURL('image/webp')` with a PNG)."""
+    if isinstance(data, str) and data.startswith("data:image/webp;base64,"):
+        path.write_bytes(base64.b64decode(data.split(",", 1)[1]))
+        return str(path)
+    return None
+
+
+def render_thumb(source: str, out_dir: Path, *, sliders: list[dict] | None = None,
+                 values: dict[str, float] | None = None, timeout_s: float = 30.0) -> BundleResult:
+    """Only the thumbnail: compile, draw t = 1 s with `values`, write `<out_dir>/thumb.webp`.
+    Used by the backfill and the refresh after slider tuning."""
+    return render_bundle(source, out_dir, sliders=sliders, values=values, timeout_s=timeout_s,
+                         phases=("compile", "thumb"))
+
+
 def run_page(page: Path | str, expression: str, *, timeout_s: float = 30.0,
-             out_dir: Path | None = None, await_promise: bool = True) -> dict:
+             out_dir: Path | None = None, await_promise: bool = True, phase: str = "page") -> dict:
     """Open a local `file://` page in the headless child and evaluate `expression` there.
 
     `expression` may evaluate to a Promise (await_promise=True). The value must be JSON
-    serialisable. Returns the value, or ``{"status": "timeout"|"no_browser"|"browser_error"|
-    "exception", "detail": ...}``. The page gets `--allow-file-access-from-files` so its own
-    vendored modules load; the network stays blocked.
+    serialisable. Returns the value, or ``{"status": "timeout"|"busy"|"no_browser"|
+    "browser_error"|"exception", "detail": ...}``; a timeout names its `phase` (`start` while the
+    page loads, then `phase`). The page gets `--allow-file-access-from-files` so its own vendored
+    modules load; the network stays blocked. Without `out_dir` the browser log goes to a temp dir
+    that is removed afterwards, never beside the page.
     """
     path = Path(page).resolve()
     if not path.is_file():
         return {"status": "browser_error", "detail": f"page not found: {path}"}
-    out_dir = out_dir or path.parent / ".run"
+    if out_dir is None:
+        scratch = tempfile.TemporaryDirectory(prefix="shaderbruecke-run-")
+        try:
+            return run_page(path, expression, timeout_s=timeout_s, out_dir=Path(scratch.name),
+                            await_promise=await_promise, phase=phase)
+        finally:
+            scratch.cleanup()
+    child = _Child(out_dir, timeout_s=timeout_s, extra_args=("--allow-file-access-from-files",))
+    started = time.monotonic()
     try:
-        with _Child(out_dir, timeout_s=timeout_s,
-                    extra_args=("--allow-file-access-from-files",)) as child:
+        with child:
             started = child.started
             try:
                 session = child.open(path.as_uri())
+                child.phase = phase
                 value = child.evaluate(expression, session=session, await_promise=await_promise)
             except _Deadline:
-                return {"status": "timeout", "wall_ms": int((time.monotonic() - started) * 1000),
-                        "detail": f"the page did not answer within {timeout_s:g} s and was killed"}
+                return {"status": "timeout", "phase": child.phase,
+                        "wall_ms": int((time.monotonic() - started) * 1000),
+                        "slot_wait_ms": child.slot_wait_ms,
+                        "detail": timeout_detail(child.phase, timeout_s)}
             except (RuntimeError, OSError, ValueError) as exc:
-                return {"status": "browser_error",
+                return {"status": "browser_error", "phase": child.phase,
                         "wall_ms": int((time.monotonic() - started) * 1000),
                         "detail": f"{exc} (see {out_dir / 'browser.log'})"}
+    except _Busy as exc:
+        return {"status": "busy", "detail": str(exc), "slot_wait_ms": child.slot_wait_ms}
     except FileNotFoundError as exc:
         return {"status": "no_browser", "detail": str(exc)}
     except (RuntimeError, OSError, ValueError) as exc:
         return {"status": "browser_error", "detail": f"{exc} (see {out_dir / 'browser.log'})"}
     if isinstance(value, dict):
         value.setdefault("wall_ms", int((time.monotonic() - started) * 1000))
+        value.setdefault("slot_wait_ms", child.slot_wait_ms)
     return value

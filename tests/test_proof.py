@@ -16,6 +16,7 @@ FIXTURES = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(ROOT.parent))
 
 import shaderbruecke as PLUGIN  # noqa: E402
+from shaderbruecke import exporting as EXPORTING  # noqa: E402
 from shaderbruecke import record as RECORD  # noqa: E402
 from shaderbruecke.exporters import header as HEADER  # noqa: E402
 from shaderbruecke.exporters import three as THREE  # noqa: E402
@@ -38,7 +39,7 @@ def record_for(fixture: str, name: str) -> dict:
 def test_three_export_matches_the_source_frame(fixture, name, tmp_path):
     document = record_for(fixture, name)
     files = THREE.files(document, {"credit": True})
-    proof = PLUGIN._prove_three(document, files, tmp_path)
+    proof = EXPORTING.prove_three(document, files, tmp_path)
     assert proof["verdict"] == "match", proof
     assert proof["diff"]["mean"] <= PLUGIN.PROOF_MEAN_LIMIT
     assert proof["diff"]["p99"] <= PLUGIN.PROOF_P99_LIMIT
@@ -53,7 +54,7 @@ def test_a_broken_export_is_reported_not_passed(tmp_path):
     files = THREE.files(document, {"credit": True})
     key = f"{HEADER.pascal(document['name'])}Material.js"
     files[key] = files[key].replace("void main()", "void main_broken()")
-    proof = PLUGIN._prove_three(document, files, tmp_path)
+    proof = EXPORTING.prove_three(document, files, tmp_path)
     assert proof["verdict"] == "not_proven", proof
     assert proof["why"]
 
@@ -64,10 +65,10 @@ def test_a_broken_export_is_reported_not_passed(tmp_path):
                                           ("sliders.glsl", "striped plasma")])
 def test_tsl_export_matches_the_source_frame(fixture, name, tmp_path):
     document = record_for(fixture, name)
-    raw = PLUGIN._raw_transpile(document, tmp_path / "raw")
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
     assert raw.get("text"), raw
     files = TSL.files(document, {"credit": True, "raw": raw["text"]})
-    proof = PLUGIN._prove_tsl(document, files, tmp_path)
+    proof = EXPORTING.prove_tsl(document, files, tmp_path)
     assert proof["verdict"] == "match", proof
     assert proof["diff"]["mean"] <= PLUGIN.PROOF_MEAN_LIMIT
     assert proof["diff"]["p99"] <= PLUGIN.PROOF_P99_LIMIT
@@ -78,9 +79,9 @@ def test_tsl_export_matches_the_source_frame(fixture, name, tmp_path):
 def test_tsl_module_evaluates_on_its_own(tmp_path):
     """The module imports and builds a node without the proof renderer: no unresolved identifiers."""
     document = record_for("sliders.glsl", "striped plasma")
-    raw = PLUGIN._raw_transpile(document, tmp_path / "raw")
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
     files = TSL.files(document, {"credit": True, "raw": raw["text"]})
-    result = PLUGIN._harness(
+    result = EXPORTING.harness(
         "const src = " + repr(list(files.values())[0]) + ";"
         " const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));"
         " try { const mod = await import(url); const node = mod.materialNode();"
@@ -103,8 +104,8 @@ def test_tsl_matrix_constructor_matches_glsl(tmp_path):
                           "  vec2 v = fragCoord / iResolution.xy - 0.5;\n"
                           "  vec2 q = mat2(0.80, 0.60, -0.60, 0.80) * v;\n"
                           "  fragColor = vec4(q * 4.0 + 0.5, 0.0, 1.0);\n}"}
-    raw = PLUGIN._raw_transpile(document, tmp_path / "raw")
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
     assert raw.get("text"), raw
     files = TSL.files(document, {"credit": True, "raw": raw["text"]})
-    proof = PLUGIN._prove_tsl(document, files, tmp_path)
+    proof = EXPORTING.prove_tsl(document, files, tmp_path)
     assert proof["verdict"] == "match", proof

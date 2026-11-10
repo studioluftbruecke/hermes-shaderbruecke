@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from .header import build_header, pascal
+from .header import build_header, display_name, effective_sliders, pascal
 
 
 def component(record: dict, *, credit: bool = True) -> str:
     name = pascal(record.get("name"))
-    sliders = record.get("sliders") or []
+    sliders = effective_sliders(record)
     header = build_header(record, "React Three Fiber (@react-three/fiber 9, three r187)", credit=credit)
     if sliders:
         props = "\n".join(f"  {slider['name']}?: number" for slider in sliders)
         defaults = "\n".join(
             f"  {slider['name']} = {slider['default']:g}," for slider in sliders)
-        destructure = ", ".join(slider["name"] for slider in sliders)
+        destructure = ", ".join(f"{slider['name']} = {slider['default']:g}" for slider in sliders)
         factory_args = ", ".join(f"{slider['name']}" for slider in sliders)
         deps = ", ".join(f"{slider['name']}" for slider in sliders)
     else:
@@ -53,7 +53,7 @@ export function {name}Background({{ {destructure} }}: {name}Props) {{
   )
 }}
 
-/** Full-screen {record.get('name')} background for an existing Canvas: `<{name}Background />`. */
+/** Full-screen {display_name(record)} background for an existing Canvas: `<{name}Background />`. */
 export function {name}(props: {name}Props = {{}}) {{
   return (
     <Canvas orthographic camera={{{{ position: [0, 0, 1], left: -1, right: 1, top: 1, bottom: -1, near: 0.1, far: 10 }}}}>

@@ -66,6 +66,22 @@ SAMPLES = {
                "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(1.0); }",
         "good": "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(1.0); }",
     },
+    "slider-redeclare": {
+        "bad": "// @slider glow 0.0..1.0 = 0.3 step 0.01\n"
+               "const float glow = 0.3;\n"
+               "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n  fragColor = vec4(glow);\n}",
+        "good": "// @slider glow 0.0..1.0 = 0.3 step 0.01\n"
+                "float halo(float glow) { return glow * 0.5; }\n"
+                "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n  fragColor = vec4(halo(glow));\n}",
+    },
+    "slider-shadow": {
+        "bad": "// @slider glow 0.0..1.0 = 0.3\n"
+               "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+               "  float glow = 0.2;\n  fragColor = vec4(glow);\n}",
+        "good": "// @slider glow 0.0..1.0 = 0.3\n"
+                "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+                "  float g = glow * 0.5;\n  fragColor = vec4(g);\n}",
+    },
 }
 
 

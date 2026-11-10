@@ -8,7 +8,7 @@ is the file the user gets.
 
 from __future__ import annotations
 
-from .header import build_header, pascal
+from .header import build_header, display_name, effective_sliders, js_template_literal, pascal
 
 # three's ShaderMaterial prefix already declares the built-in attributes and adds `#version`
 # for GLSL3, so this is just the body.
@@ -45,9 +45,9 @@ def fragment(record: dict, *, credit: bool = True) -> str:
 
 def material(record: dict, *, credit: bool = True) -> str:
     name = pascal(record.get("name"))
-    sliders = record.get("sliders") or []
+    sliders = effective_sliders(record)
     header = build_header(record, "three.js ShaderMaterial (three r187)", credit=credit)
-    fragment_text = fragment(record, credit=credit).replace("`", "\\`").replace("${", "\\${")
+    fragment_text = js_template_literal(fragment(record, credit=credit))
     slider_uniforms = "\n".join(
         f"    {slider['name']}: {{ value: options.{slider['name']} ?? {slider['default']:g} }},"
         for slider in sliders)
@@ -62,7 +62,7 @@ export const fragmentShader = `{fragment_text}`
 
 {VERTEX}
 /**
- * Create the {record.get('name')} material.
+ * Create the {display_name(record)} material.
 {options_line}
  * @returns {{THREE.ShaderMaterial}} call `setSize(width, height)` and `update(seconds)` each frame
  */

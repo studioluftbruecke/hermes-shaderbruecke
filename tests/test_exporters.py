@@ -58,7 +58,7 @@ def files_for(row, record):
 
 
 def test_registry_rows_are_complete():
-    assert REGISTRY.target_ids() == ["three", "tsl", "r3f", "agent", "shadertoy"]
+    assert REGISTRY.target_ids() == ["three", "tsl", "r3f", "agent", "shadertoy", "td", "isf"]
     for target_id, row in REGISTRY.EXPORT_TARGETS.items():
         assert row.id == target_id
         assert row.label and row.main_file and row.steps and row.proof
@@ -118,7 +118,7 @@ def test_three_fragment_is_self_contained():
 def test_shadertoy_uses_const_floats():
     record = record_for("sliders.glsl", "striped plasma")
     text = SHADERTOY.source_tab(record)
-    assert "const float frequency = 5;" in text
+    assert "const float frequency = 5.0;" in text
     assert "const float warp = 0.8;" in text
     assert "const float palette = 0.35;" in text
     assert "uniform float" not in text

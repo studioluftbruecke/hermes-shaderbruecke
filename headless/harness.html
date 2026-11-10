@@ -15,6 +15,9 @@
     renderGLSL(p)    render a Shadertoy-style shader through three's WebGLRenderer
     renderTSL(p)     evaluate a transpiled module and render it through WebGPURenderer(forceWebGL)
     compareModules(p) render a module next to the source and return the frame difference
+    compareChecks(p) the proof: source and export at several moments and slider sets, per-check diffs
+                     (kinds material, tsl, glsl, and the td / isf host shims)
+    gridMeans(...)   mean RGB of a 3x3 grid, the handoff's host-free acceptance numbers
   Every call returns plain JSON (numbers, logs, PNG data URLs), never typed arrays.
 -->
 <script type="importmap">
@@ -304,9 +307,494 @@ function summarise(frame, png) {
   return { ...lumaStats(frame.pixels), png }
 }
 
+/** Mean R, G, B (0..255) of a 3x3 grid, row by row from the top left of the image. */
+function gridMeans(pixels, width, height) {
+  const cells = []
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const y0 = Math.floor(row * height / 3)
+      const y1 = Math.floor((row + 1) * height / 3)
+      const x0 = Math.floor(col * width / 3)
+      const x1 = Math.floor((col + 1) * width / 3)
+      let r = 0
+      let g = 0
+      let b = 0
+      let n = 0
+      for (let y = y0; y < y1; y++) {
+        const glRow = height - 1 - y          // GL reads bottom-up
+        for (let x = x0; x < x1; x++) {
+          const i = (glRow * width + x) * 4
+          r += pixels[i]
+          g += pixels[i + 1]
+          b += pixels[i + 2]
+          n++
+        }
+      }
+      cells.push([r / n, g / n, b / n].map(v => Math.round(v * 10) / 10))
+    }
+  }
+  return cells
+}
+
+/**
+ * One renderer and one compiled program per side, reused for every check: only uniforms change
+ * between checks, so the proof costs two compiles instead of two per check.
+ */
+function glslSession({ source, sliderNames = [], width, height }) {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true })
+  renderer.setPixelRatio(1)
+  renderer.setSize(width, height, false)
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace
+  renderer.toneMapping = THREE.NoToneMapping
+  const declared = {}
+  for (const name of sliderNames) declared[name] = 0
+  const uniforms = {
+    iResolution: { value: new THREE.Vector3(width, height, 1) },
+    iTime: { value: 0 },
+    iTimeDelta: { value: 1 / 60 },
+    iFrame: { value: 0 },
+    iMouse: { value: new THREE.Vector4(0, 0, 0, 0) },
+    iDate: { value: new THREE.Vector4(2026, 10, 6, 0) }
+  }
+  for (const name of sliderNames) uniforms[name] = { value: 0 }
+  const material = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3, uniforms, vertexShader: VERTEX,
+    fragmentShader: glslSource(source, declared)
+  })
+  const scene = new THREE.Scene()
+  scene.add(new THREE.Mesh(triangleGeometry(), material))
+  const target = new THREE.WebGLRenderTarget(width, height, { depthBuffer: false, stencilBuffer: false })
+  const camera = orthoCamera()
+  return {
+    render(time, values = {}) {
+      uniforms.iTime.value = time
+      uniforms.iFrame.value = Math.round(time * 60)
+      for (const [name, value] of Object.entries(values)) if (uniforms[name]) uniforms[name].value = value
+      let log = ''
+      const previous = console.error
+      console.error = (...args) => { log += args.join(' ') + '\n' }
+      try {
+        renderer.setRenderTarget(target)
+        renderer.render(scene, camera)
+        const pixels = new Uint8Array(width * height * 4)
+        renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels)
+        renderer.setRenderTarget(null)
+        if (log.trim()) return { ok: false, log: log.trim().slice(0, 4000) }
+        return { ok: true, pixels }
+      } catch (error) {
+        return { ok: false, log: String(error) + '\n' + log }
+      } finally {
+        console.error = previous
+      }
+    },
+    dispose() { target.dispose(); material.dispose(); renderer.dispose() }
+  }
+}
+
+/** The exported material factory, imported once; one material per distinct options object. */
+async function materialSession({ moduleSource, factory, width, height }) {
+  const url = URL.createObjectURL(new Blob([moduleSource], { type: 'text/javascript' }))
+  let mod
+  try {
+    mod = await import(url)
+  } catch (error) {
+    URL.revokeObjectURL(url)
+    return { error: `module evaluation failed: ${error && error.message ? error.message : error}` }
+  }
+  URL.revokeObjectURL(url)
+  const create = mod[factory]
+  if (typeof create !== 'function') return { error: `the module does not export ${factory}` }
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true })
+  renderer.setPixelRatio(1)
+  renderer.setSize(width, height, false)
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace
+  renderer.toneMapping = THREE.NoToneMapping
+  const target = new THREE.WebGLRenderTarget(width, height, { depthBuffer: false, stencilBuffer: false })
+  const camera = orthoCamera()
+  const geometry = triangleGeometry()
+  const materials = new Map()
+  return {
+    render(time, options) {
+      const key = JSON.stringify(options || {})
+      // three reports a failed GLSL compile on console.error and then draws nothing: a black
+      // frame is not a "differs" verdict, it is an export that never rendered.
+      const errors = []
+      const previous = console.error
+      console.error = (...args) => { errors.push(args.map(part => String(part)).join(' ')) }
+      try {
+        if (!materials.has(key)) {
+          const material = create(options || {})
+          const scene = new THREE.Scene()
+          scene.add(new THREE.Mesh(geometry, material))
+          materials.set(key, { material, scene })
+        }
+        const { material, scene } = materials.get(key)
+        if (material.setSize) material.setSize(width, height)
+        if (material.update) material.update(time)
+        renderer.setRenderTarget(target)
+        renderer.render(scene, camera)
+        const pixels = new Uint8Array(width * height * 4)
+        renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels)
+        renderer.setRenderTarget(null)
+        if (errors.length) return { ok: false, log: errors.join('\n').slice(0, 4000) }
+        return { ok: true, pixels }
+      } catch (error) {
+        return { ok: false, log: String(error) + (error && error.stack ? '\n' + error.stack : '') }
+      } finally {
+        console.error = previous
+      }
+    },
+    dispose() {
+      for (const { material } of materials.values()) material.dispose()
+      target.dispose()
+      renderer.dispose()
+    }
+  }
+}
+
+/** A transpiled TSL module: one renderer, one node material; checks change uniform values only. */
+async function tslSession({ moduleSource, width, height }) {
+  const url = URL.createObjectURL(new Blob([moduleSource], { type: 'text/javascript' }))
+  let mod
+  try {
+    mod = await import(url)
+  } catch (error) {
+    URL.revokeObjectURL(url)
+    return { error: `module evaluation failed: ${error && error.message ? error.message : error}` }
+  }
+  URL.revokeObjectURL(url)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const renderer = new WebGPURenderer({ canvas, antialias: false, forceWebGL: true })
+  renderer.setPixelRatio(1)
+  renderer.setSize(width, height, false)
+  renderer.outputColorSpace = LinearSRGBColorSpace
+  renderer.toneMapping = NoToneMapping
+  try {
+    await renderer.init()
+  } catch (error) {
+    return { error: `renderer init failed: ${error && error.message ? error.message : error}` }
+  }
+  // The module's own defaults, so a check without overrides always renders them.
+  const defaults = {}
+  for (const [name, value] of Object.entries(mod)) {
+    if (name !== 'sbTime' && value && typeof value === 'object' && typeof value.value === 'number') {
+      defaults[name] = value.value
+    }
+  }
+  let material
+  try {
+    material = new MeshBasicNodeMaterial()
+    const node = mod.mainImage()
+    material.colorNode = node && node.rgb ? node.rgb : node
+  } catch (error) {
+    renderer.dispose()
+    return { error: String(error) + (error && error.stack ? '\n' + error.stack : '') }
+  }
+  const scene = new Scene()
+  scene.add(new Mesh(triangleGeometry(), material))
+  const target = new RenderTarget(width, height, { depthBuffer: false })
+  const camera = orthoCamera()
+  return {
+    async render(time, sliders) {
+      try {
+        if (mod.sbTime && mod.sbTime.value !== undefined) mod.sbTime.value = time
+        for (const [name, value] of Object.entries(defaults)) mod[name].value = value
+        for (const [name, value] of Object.entries(sliders || {})) {
+          if (mod[name] && mod[name].value !== undefined) mod[name].value = value
+        }
+        renderer.setRenderTarget(target)
+        await renderer.renderAsync(scene, camera)
+        const pixels = await renderer.readRenderTargetPixelsAsync(target, 0, 0, width, height)
+        renderer.setRenderTarget(null)
+        const bytes = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels.buffer || pixels)
+        return { ok: true, pixels: bytes }
+      } catch (error) {
+        return { ok: false, log: String(error) + (error && error.stack ? '\n' + error.stack : '') }
+      }
+    },
+    dispose() { target.dispose(); material.dispose(); renderer.dispose() }
+  }
+}
+
+/**
+ * WebGL2 shims of two host wrappers. Each builds the preamble its host puts in front of the file
+ * (what the host declares and provides), compiles the exported file behind it unchanged, and
+ * renders a full-screen triangle into an RGBA8 target, like the reference.
+ *
+ * td:  TouchDesigner's GLSL TOP. The host adds #version, vUV (the pixel centre in 0..1),
+ *      uTDOutputInfo (res = 1/w, 1/h, w, h) and TDOutputSwizzle (identity for RGBA). The user's
+ *      Vectors page rows come from the file's `// Vectors page: name = value` comments, which are
+ *      the rows the steps tell the user to add; absTime.* runs on the harness clock at 60 fps.
+ * isf: an ISF host, modelled on VVISF's OpenGL 3 / ES 3 path (ISFDoc.cpp): the JSON between the
+ *      first `/*` and the first `* /` describes the inputs, the code starts after that line, and
+ *      the host declares gl_FragColor (as a define onto an out), PASSINDEX, RENDERSIZE,
+ *      isf_FragNormCoord, TIME, TIMEDELTA, DATE, FRAMEINDEX and one uniform per INPUT, set to
+ *      its DEFAULT until the user moves the control.
+ */
+const SHIM_VERTEX = {
+  td: `#version 300 es
+in vec2 position;
+out vec3 vUV;
+void main() { vUV = vec3(position * 0.5 + 0.5, 0.0); gl_Position = vec4(position, 0.0, 1.0); }`,
+  isf: `#version 300 es
+in vec2 position;
+out vec2 isf_FragNormCoord;
+void main() {
+  gl_Position = vec4(position, 0.0, 1.0);
+  isf_FragNormCoord = vec2((gl_Position.x + 1.0) / 2.0, (gl_Position.y + 1.0) / 2.0);
+}`
+}
+
+const TD_PREAMBLE = `#version 300 es
+precision highp float;
+precision highp int;
+struct TDTexInfo { vec4 res; vec4 depth; };
+uniform TDTexInfo uTDOutputInfo;
+in vec3 vUV;
+vec4 TDOutputSwizzle(vec4 c) { return c; }
+#line 1
+`
+
+const TD_CLOCK = {
+  'absTime.seconds': time => time,
+  'absTime.stepSeconds': () => 1 / 60,
+  'absTime.frame': time => Math.round(time * 60)
+}
+
+/** The Vectors page rows the file documents: {name: [token, ...]}. */
+function tdBindings(text) {
+  const rows = {}
+  const pattern = /^uniform\s+(?:float|vec[234])\s+(\w+)\s*;\s*\/\/ Vectors page: (\w+) = ([^(\n]*)/gm
+  for (const match of text.matchAll(pattern)) {
+    if (match[1] === match[2]) rows[match[1]] = match[3].trim().split(/\s+/)
+  }
+  return rows
+}
+
+function tdShim(text) {
+  if (/^\s*#version\b/m.test(text)) return { error: 'TouchDesigner adds #version itself; the file must not have one' }
+  const bindings = tdBindings(text)
+  for (const [name, tokens] of Object.entries(bindings)) {
+    for (const token of tokens) {
+      if (!(token in TD_CLOCK) && !Number.isFinite(Number(token))) {
+        return { error: `the Vectors page value for ${name} is neither a number nor a known expression: ${token}` }
+      }
+    }
+  }
+  return {
+    fragment: TD_PREAMBLE + text,
+    values(time, width, height, overrides) {
+      const values = { 'uTDOutputInfo.res': [1 / width, 1 / height, width, height],
+                       'uTDOutputInfo.depth': [1, 1, 0, 0] }
+      for (const [name, tokens] of Object.entries(bindings)) {
+        const numbers = tokens.map(token => token in TD_CLOCK ? TD_CLOCK[token](time) : Number(token))
+        values[name] = numbers.length === 1 ? numbers[0] : numbers
+      }
+      return { ...values, ...overrides }
+    }
+  }
+}
+
+const ISF_TYPES = { float: 'float', bool: 'bool', event: 'bool', long: 'int', point2D: 'vec2', color: 'vec4' }
+
+function isfShim(text) {
+  const open = text.indexOf('/*')
+  const close = text.indexOf('*/')
+  if (open < 0 || close < 0 || close < open) return { error: 'the file has no ISF JSON comment' }
+  if (text.slice(0, open).trim()) return { error: 'the ISF JSON comment is not the first thing in the file' }
+  let meta
+  try {
+    meta = JSON.parse(text.slice(open + 2, close))
+  } catch (error) {
+    return { error: `the ISF JSON does not parse: ${error.message}` }
+  }
+  if (meta.ISFVSN !== '2.0') return { error: `ISFVSN is ${JSON.stringify(meta.ISFVSN)}, expected "2.0"` }
+  const newline = text.indexOf('\n', close)
+  const code = newline < 0 ? '' : text.slice(newline + 1)
+  const declarations = []
+  const defaults = {}
+  for (const input of meta.INPUTS || []) {
+    const type = ISF_TYPES[input.TYPE]
+    if (!type) return { error: `the shim does not emulate ${input.TYPE} inputs (${input.NAME})` }
+    if (!/^[A-Za-z_]\w*$/.test(String(input.NAME))) return { error: `INPUT NAME ${JSON.stringify(input.NAME)} is not an identifier` }
+    declarations.push(`uniform ${type} ${input.NAME};`)
+    if (input.DEFAULT !== undefined) defaults[input.NAME] = input.DEFAULT
+  }
+  const fragment = ['#version 300 es', 'precision highp float;', 'precision highp int;',
+    '#define gl_FragColor isf_FragColor', 'out vec4 gl_FragColor;',
+    'uniform int PASSINDEX;', 'uniform vec2 RENDERSIZE;', 'in vec2 isf_FragNormCoord;',
+    'uniform float TIME;', 'uniform float TIMEDELTA;', 'uniform vec4 DATE;', 'uniform int FRAMEINDEX;',
+    ...declarations, '#line 1', code].join('\n')
+  return {
+    fragment,
+    meta,
+    values(time, width, height, overrides) {
+      return { PASSINDEX: 0, RENDERSIZE: [width, height], TIME: time, TIMEDELTA: 1 / 60,
+               DATE: [2026, 10, 6, 0], FRAMEINDEX: Math.round(time * 60), ...defaults, ...overrides }
+    }
+  }
+}
+
+function compileShader(gl, type, text) {
+  const shader = gl.createShader(type)
+  gl.shaderSource(shader, text)
+  gl.compileShader(shader)
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader) || 'compile failed'
+    gl.deleteShader(shader)
+    return { error: log }
+  }
+  return { shader }
+}
+
+function setUniform(gl, program, info, value) {
+  const location = gl.getUniformLocation(program, info.name)
+  const list = Array.isArray(value) ? value : [value]
+  switch (info.type) {
+    case gl.FLOAT: gl.uniform1f(location, list[0]); break
+    case gl.FLOAT_VEC2: gl.uniform2fv(location, list.slice(0, 2)); break
+    case gl.FLOAT_VEC3: gl.uniform3fv(location, list.slice(0, 3)); break
+    case gl.FLOAT_VEC4: gl.uniform4fv(location, list.slice(0, 4)); break
+    case gl.INT: gl.uniform1i(location, Math.round(list[0])); break
+    case gl.BOOL: gl.uniform1i(location, list[0] ? 1 : 0); break
+    default: return `uniform ${info.name} has a type the shim does not set`
+  }
+  return null
+}
+
+function shimSession({ kind, text, width, height }) {
+  const host = kind === 'td' ? tdShim(text) : kind === 'isf' ? isfShim(text) : { error: `unknown shim ${kind}` }
+  if (host.error) return { error: host.error }
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true })
+  if (!gl) return { error: 'WebGL2 is not available in the proof browser' }
+  const vertex = compileShader(gl, gl.VERTEX_SHADER, SHIM_VERTEX[kind])
+  if (vertex.error) return { error: `shim vertex shader: ${vertex.error}` }
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, host.fragment)
+  if (fragment.error) return { error: `the exported file does not compile in the ${kind} shim: ${fragment.error}` }
+  const program = gl.createProgram()
+  gl.attachShader(program, vertex.shader)
+  gl.attachShader(program, fragment.shader)
+  gl.bindAttribLocation(program, 0, 'position')
+  gl.linkProgram(program)
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    return { error: `the exported file does not link in the ${kind} shim: ${gl.getProgramInfoLog(program)}` }
+  }
+  const texture = gl.createTexture()
+  gl.bindTexture(gl.TEXTURE_2D, texture)
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height)
+  const framebuffer = gl.createFramebuffer()
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
+  const buffer = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
+  const vao = gl.createVertexArray()
+  gl.bindVertexArray(vao)
+  gl.enableVertexAttribArray(0)
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+  const active = []
+  for (let i = 0; i < gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS); i++) active.push(gl.getActiveUniform(program, i))
+  return {
+    render(time, overrides = {}) {
+      try {
+        const values = host.values(time, width, height, overrides)
+        gl.useProgram(program)
+        for (const info of active) {
+          // A uniform with no value keeps 0, as an unbound uniform does in the host.
+          if (!(info.name in values)) continue
+          const problem = setUniform(gl, program, info, values[info.name])
+          if (problem) return { ok: false, log: problem }
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer)
+        gl.viewport(0, 0, width, height)
+        gl.clearColor(0, 0, 0, 0)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.bindVertexArray(vao)
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        const pixels = new Uint8Array(width * height * 4)
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+        const error = gl.getError()
+        if (error !== gl.NO_ERROR) return { ok: false, log: `WebGL error 0x${error.toString(16)} in the ${kind} shim` }
+        return { ok: true, pixels }
+      } catch (error) {
+        return { ok: false, log: String(error) + (error && error.stack ? '\n' + error.stack : '') }
+      }
+    },
+    dispose() {
+      gl.deleteProgram(program)
+      gl.deleteTexture(texture)
+      gl.deleteFramebuffer(framebuffer)
+      const lose = gl.getExtension('WEBGL_lose_context')
+      if (lose) lose.loseContext()
+    }
+  }
+}
+
+/**
+ * Render the source and the export side by side for every check and diff each pair.
+ * kind: 'material' (a ShaderMaterial factory module), 'tsl' (a node module), 'glsl' (a
+ * Shadertoy tab rendered through the same GLSL path as the source), or 'td' / 'isf' (a host file
+ * rendered in that host's shim). A check with `override`
+ * passes its values to the export; without it the export runs on its own defaults, which proves
+ * that the defaults it ships are the values the reference uses. The check marked `primary`
+ * returns both frames as PNGs and the reference's 3x3 grid.
+ */
+async function compareChecks({ kind, source, moduleSource, factory, width = 512, height = 288, checks = [] }) {
+  const sliderNames = [...new Set(checks.flatMap(check => Object.keys(check.values || {})))]
+  const reference = glslSession({ source, sliderNames, width, height })
+  let exported
+  if (kind === 'material') exported = await materialSession({ moduleSource, factory, width, height })
+  else if (kind === 'tsl') exported = await tslSession({ moduleSource, width, height })
+  else if (kind === 'glsl') exported = glslSession({ source: moduleSource, sliderNames: [], width, height })
+  else if (kind === 'td' || kind === 'isf') exported = shimSession({ kind, text: moduleSource, width, height })
+  else exported = { error: `unknown kind ${kind}` }
+  const results = []
+  const out = { ok: true }
+  try {
+    if (exported.error) return { ok: false, stage: 'export', log: exported.error }
+    for (const check of checks) {
+      const time = check.t
+      const left = reference.render(time, check.values || {})
+      if (!left.ok) return { ok: false, stage: 'reference', t: time, log: left.log }
+      const given = check.override ? (check.values || {}) : {}
+      const right = await exported.render(time, given)
+      if (!right.ok) {
+        return { ok: false, stage: 'export', t: time, log: right.log,
+                 reference_png: pngFromPixels(left.pixels, width, height) }
+      }
+      const diff = frameDiff(left.pixels, right.pixels)
+      results.push({ t: time, mean: diff.mean, p99: diff.p99, max: diff.max })
+      if (check.primary) {
+        out.reference_png = pngFromPixels(left.pixels, width, height)
+        out.export_png = pngFromPixels(right.pixels, width, height)
+        out.grid = gridMeans(left.pixels, width, height)
+      }
+    }
+  } finally {
+    reference.dispose()
+    if (exported && exported.dispose) exported.dispose()
+  }
+  out.checks = results
+  return out
+}
+
 const api = {
   ready: true,
   version: HARNESS_VERSION,
+
+  compareChecks,
+  gridMeans,
 
   renderGLSL(params) {
     const frame = renderGLSLPixels(params)

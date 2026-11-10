@@ -48,6 +48,22 @@
       "severity": "error",
       "message": "the renderer supplies `main()`; a second one is a redefinition",
       "hint": "write `void mainImage(out vec4 fragColor, in vec2 fragCoord)` only"
+    },
+    {
+      "id": "slider-redeclare",
+      "kind": "slider_decl",
+      "scope": "global",
+      "severity": "error",
+      "message": "`{name}` has a `@slider` line, which already declares `uniform float {name}`; declaring it again fails to compile",
+      "hint": "delete this declaration; the slider supplies `{name}`"
+    },
+    {
+      "id": "slider-shadow",
+      "kind": "slider_decl",
+      "scope": "local",
+      "severity": "warn",
+      "message": "this local `{name}` hides the slider of the same name, so moving the slider changes nothing here",
+      "hint": "rename the local variable, or read the slider directly"
     }
   ]
 }

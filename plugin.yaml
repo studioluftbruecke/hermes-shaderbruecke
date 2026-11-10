@@ -1,6 +1,6 @@
 name: shaderbruecke
-version: "0.1.0"
-description: "Shaderbrücke: make, check, tune and export GLSL shaders with your Hermes agent. The agent writes the shader, a headless Chromium on the host lints, compiles and renders it, the agent looks at its own frames and fixes them, Desktop plays the result live with sliders, and the exports (three.js, R3F, TSL, Shadertoy, agent handoff) carry a frame-by-frame proof."
+version: "0.2.0"
+description: "Shaderbrücke: make, check, tune and export GLSL shaders with your Hermes agent. The agent writes the shader, a headless Chromium on the host lints, compiles and renders it, the agent looks at its own frames and fixes them, Desktop plays the result live with sliders and keeps every shader on a Shaders page (versions, forks, licences, a Lab editor, share files and import), and the exports (three.js, R3F, TSL, Shadertoy, agent handoff, and experimental TouchDesigner and ISF) carry a frame-by-frame proof."
 author: "Studio Luftbrücke"
 license: MIT
 requires_hermes: ">=0.22.7"
@@ -8,6 +8,8 @@ provides_tools:
   - shader_render
   - shader_library
   - shader_export
+provides_hooks:
+  - pre_llm_call
 config_schema:
   allow_project_writes:
     type: boolean
@@ -17,3 +19,15 @@ config_schema:
     type: boolean
     default: true
     description: "Append the 'Made with Shaderbruecke' line to every export header."
+  keep_versions:
+    type: int
+    default: 5
+    description: "Keep frames and proof images for the newest N versions of each shader; older versions keep their source, record and export files."
+  author_name:
+    type: string
+    default: ""
+    description: "Your name as it appears in export headers and share files (empty: none)."
+  author_url:
+    type: string
+    default: ""
+    description: "A link that goes with your name in export headers and share files (https://...)."

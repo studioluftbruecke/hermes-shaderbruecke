@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from .header import build_header, pascal
+from .header import build_header, effective_sliders, pascal
 
 FORBIDDEN_NAMES = ("iMouse", "iFrame", "iDate", "iTimeDelta", "iChannel")
 
@@ -146,7 +146,7 @@ def rewrite(raw: str, sliders: list[dict] | None = None) -> str:
 
 def module(record: dict, raw: str, *, credit: bool = True) -> str:
     header = build_header(record, "TSL module (three r187 transpiler)", credit=credit)
-    return header + "\n" + rewrite(raw, record.get("sliders") or [])
+    return header + "\n" + rewrite(raw, effective_sliders(record))
 
 
 def files(record: dict, options: dict) -> dict[str, str]:

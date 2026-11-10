@@ -50,6 +50,11 @@ def load_rules(path: Path | str | None = None) -> list[dict]:
     return [dict(rule) for rule in rules]
 
 
+# Read once, with the code. A gateway keeps these modules until a plugin reload, so a rules file
+# read per call could come from newer files on disk and name a kind this code cannot run.
+RULES = load_rules()
+
+
 def strip_comments(source: str) -> str:
     """Blank out ``//`` and ``/* */`` comments with spaces, keeping every newline.
 
@@ -121,13 +126,43 @@ def _const_names(text: str) -> set[str]:
 
 _BOUND_RE = re.compile(r"^\s*[A-Za-z_]\w*\s*(<=|>=|<|>)\s*([0-9]+(?:\.[0-9]*)?|[A-Za-z_]\w*)\s*$")
 
+# The names `@slider` lines claim. record.parse_sliders is stricter (range, default, cap); the
+# renderer passes its parsed names, and this loose read is for callers with only the source.
+_SLIDER_NAME_RE = re.compile(r"^[ \t]*//[ \t]*@slider[ \t]+([A-Za-z_]\w*)", re.M)
+_DECL_TYPE = r"(?:float|int|uint|bool|[biu]?vec[234]|mat[234](?:x[234])?)"
 
-def lint(source: str, rules: Sequence[dict] | None = None) -> list[LintFinding]:
-    """Every finding for `source`, ordered by line. Comments are stripped first, always."""
+
+def slider_names_in(source: str) -> list[str]:
+    return list(dict.fromkeys(_SLIDER_NAME_RE.findall(source)))
+
+
+def _slider_declarations(text: str, names: Iterable[str]) -> list[tuple[str, int, str]]:
+    """(name, index, scope) for each declaration of a slider name. Parameters are skipped: a
+    parameter named like a slider and called with it is fine. `#define` counts as global."""
+    found = []
+    for name in names:
+        pattern = re.compile(rf"(?:\b{_DECL_TYPE}[ \t]+|#[ \t]*define[ \t]+){re.escape(name)}\b")
+        for match in pattern.finditer(text):
+            before = text[:match.start()]
+            if before.count("(") > before.count(")"):
+                continue
+            nested = before.count("{") > before.count("}")
+            global_scope = match.group(0).lstrip().startswith("#") or not nested
+            found.append((name, match.start(), "global" if global_scope else "local"))
+    return found
+
+
+def lint(source: str, rules: Sequence[dict] | None = None,
+         slider_names: Sequence[str] | None = None) -> list[LintFinding]:
+    """Every finding for `source`, ordered by line. Comments are stripped first, always.
+
+    `slider_names` are the sliders the renderer will declare as uniforms; by default the names on
+    the source's `@slider` lines."""
     stripped = strip_comments(source)
     constants = _const_names(stripped)
+    names = list(slider_names) if slider_names is not None else slider_names_in(source)
     findings: list[LintFinding] = []
-    for rule in rules if rules is not None else load_rules():
+    for rule in rules if rules is not None else RULES:
         kind = rule.get("kind", "regex")
         severity = rule.get("severity", "error")
         if kind == "regex":
@@ -147,6 +182,12 @@ def lint(source: str, rules: Sequence[dict] | None = None) -> list[LintFinding]:
                     findings.append(LintFinding(rule["id"], _line_at(stripped, index), severity,
                                                 rule.get("message", "unbounded loop"),
                                                 rule.get("hint", "")))
+        elif kind == "slider_decl":
+            for name, index, scope in _slider_declarations(stripped, names):
+                if scope == rule.get("scope", "global"):
+                    findings.append(LintFinding(rule["id"], _line_at(stripped, index), severity,
+                                                rule.get("message", "").replace("{name}", name),
+                                                rule.get("hint", "").replace("{name}", name)))
         else:
             raise ValueError(f"unknown lint rule kind: {kind}")
     return sorted(findings, key=lambda f: (f.line, f.rule))
@@ -160,6 +201,19 @@ def frame_stats(lumas: Iterable[float]) -> tuple[float, float]:
     mean = sum(values) / len(values)
     variance = sum((v - mean) ** 2 for v in values) / len(values)
     return mean, variance ** 0.5
+
+
+_STILL_SHARE = 0.002        # under 0.2% of pixels changed between every pair of frames: still
+
+
+def motion(frames: Sequence[dict]) -> dict:
+    """`moving`, `still` or `unknown` from each frame's `moved` share (changed pixels against the
+    previous frame). `luma_mean` cannot answer this: drifting clouds keep it constant."""
+    moved = [frame["moved"] for frame in frames[1:] if isinstance(frame.get("moved"), (int, float))]
+    if not moved:
+        return {"verdict": "unknown", "moved": [], "max": None}
+    peak = max(moved)
+    return {"verdict": "moving" if peak >= _STILL_SHARE else "still", "moved": moved, "max": peak}
 
 
 def flat(frames: Sequence[dict]) -> bool:
