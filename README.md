@@ -51,6 +51,8 @@ on. When Hermes runs on a server, install the plugin in both places, on the same
   computer and `hermes -p <profile> plugins list` on the server, or run
   `git -C ~/.hermes/profiles/<profile>/plugins/shaderbruecke log -1 --oneline` on each
   (`~/.hermes/plugins/shaderbruecke` for the default profile).
+- The sidebar switch and position on the plugin's settings page are kept per Desktop, so a second
+  computer starts with the defaults.
 
 **Requirements.** Hermes 0.23.0 or newer and a Chromium. The Hermes container image ships one, and
 the plugin finds it on its own. Elsewhere, put `chromium` on `PATH` or point
@@ -77,6 +79,9 @@ GPU, no Python dependencies, no npm.
 | `author_url` | empty | A web link (http or https) next to your name. |
 
 Settings apply to the next call; no reload is needed.
+
+In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show in the sidebar** and
+**Position** (lower numbers sit higher). The settings above are beneath it, under **Agent settings**.
 
 ## Safety and disclosures
 
@@ -137,6 +142,9 @@ delete it.
 
 ## Changes
 
+- **0.2.2:** Shaderbrücke has its own page under Settings → Plugins, so the plugin is listed once,
+  under its name. The page shows or hides the sidebar row and sets its position (52, below
+  Kanban, kept per Desktop), and opens the agent settings beneath it. Needs Hermes 0.23.0.
 - **0.2.1:** fixes from the first hands-on test of 0.2.0. Desktop names the page Shaderbrücke. The
   Lab plays your edits live once you have pressed Play one time, and the Save button shows its
   shortcut. The Export menu fits its options on every surface, and the agent handoff lives in it

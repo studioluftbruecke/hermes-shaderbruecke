@@ -5769,6 +5769,183 @@ const LAB_CSS = `
 .sb-btn-on{border-color:var(--ui-accent)}
 `
 
+// ---------------------------------------------------------------------------------------------
+// Sidebar row and settings page. The row comes from the shared module below, at 52 (D3 of the
+// sidebar-rows plan). The settings page gives the plugin its own entry under Settings, Plugins,
+// titled Shaderbrücke; Hermes then folds the schema form beneath it as "Agent settings" instead of
+// listing a second entry named after the slug (D7).
+// ---------------------------------------------------------------------------------------------
+
+// sidebar-row v1 begin
+// The plugin's sidebar row: its brand as the label (plus an optional count), a show switch and a
+// position, kept per Desktop in ctx.storage under 'sidebar' as { show, position }. One source:
+// templates/plugin-skeleton/desktop/sidebar-row.js. Every copy (desktop/src/sidebar-row.js in a
+// built plugin, the marked block in a single-file desktop/plugin.js) must equal it between these
+// markers; tests/test_sidebar_row.py fails one that differs. Change the template, then copy it.
+// Import-free: the plugin passes the SDK names in `sdk`:
+//   { SIDEBAR_NAV_AREA, Switch, Input, jsx, jsxs, atom, useValue }
+const SIDEBAR_ROW_KEY = 'sidebar'
+const SIDEBAR_ROW_MIN = 1
+const SIDEBAR_ROW_MAX = 99
+
+/** An integer from 1 to 99, or `fallback` when `value` is not a number. */
+function sidebarRowPosition(value, fallback) {
+  if (value === null || value === undefined || value === '') return fallback
+  const n = Math.round(Number(value))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(SIDEBAR_ROW_MAX, Math.max(SIDEBAR_ROW_MIN, n))
+}
+
+/** The row's label: the brand, plus " · N" while N is above 0 ("99+" from 100). */
+function sidebarRowLabel(brand, count) {
+  const n = Math.floor(Number(count) || 0)
+  return n > 0 ? `${brand} · ${n < 100 ? n : '99+'}` : brand
+}
+
+/** Register the row from this Desktop's stored choice (nothing stored: shown, at defaultPosition).
+ *  No backend read, so the row paints in its place with the first frame. Every change disposes the
+ *  held contribution before it registers again: Desktop's registry replaces an entry by id, and an
+ *  older disposer would then remove the new entry. */
+function startSidebarRow(ctx, { brand, path, codicon, defaultPosition, sdk }) {
+  const store = ctx.storage || { get: (key, fallback) => fallback, set: () => {} }
+  const fallback = sidebarRowPosition(defaultPosition, 50)
+  const stored = store.get(SIDEBAR_ROW_KEY, null)
+  const saved = stored && typeof stored === 'object' ? stored : {}
+  const $prefs = sdk.atom({ show: saved.show !== false, position: sidebarRowPosition(saved.position, fallback) })
+  let count = 0
+  let disposeRow = null
+  let stopped = false
+
+  const drop = () => {
+    const dispose = disposeRow
+    disposeRow = null
+    if (dispose) dispose()
+  }
+  const apply = () => {
+    drop()
+    const { show, position } = $prefs.get()
+    if (stopped || !show) return
+    disposeRow = ctx.register({ id: 'nav', area: sdk.SIDEBAR_NAV_AREA, order: position, data: { codicon, label: sidebarRowLabel(brand, count), path } })
+  }
+  apply()
+
+  return {
+    brand,
+    $prefs,
+    prefs: () => $prefs.get(),
+    /** A new count relabels a shown row; a hidden row stays hidden and shows the count when shown. */
+    setCount(n) {
+      const next = Math.max(0, Math.floor(Number(n) || 0))
+      const relabel = sidebarRowLabel(brand, next) !== sidebarRowLabel(brand, count)
+      count = next
+      if (relabel && $prefs.get().show) apply()
+    },
+    /** Store { show, position } (either may be left out), then show, hide or move the row at once. */
+    setPrefs(patch) {
+      const now = $prefs.get()
+      const p = patch && typeof patch === 'object' ? patch : {}
+      const next = {
+        show: 'show' in p ? p.show !== false : now.show,
+        position: sidebarRowPosition(p.position, now.position),
+      }
+      if (next.show === now.show && next.position === now.position) return now
+      store.set(SIDEBAR_ROW_KEY, next)
+      $prefs.set(next)
+      apply()
+      return next
+    },
+    /** Remove the row for good (the plugin's own unload runs Desktop's disposers anyway). */
+    dispose() {
+      stopped = true
+      drop()
+    },
+  }
+}
+
+/** The "Sidebar" block of the plugin's settings page: SDK Switch and Input, nothing else. */
+function SidebarSection({ row, sdk }) {
+  const { jsx, Switch, Input } = sdk
+  const jsxs = sdk.jsxs || sdk.jsx
+  const prefs = sdk.useValue(row.$prefs)
+  const line = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minHeight: 32 }
+  const note = { margin: 0, fontSize: '0.75rem', color: 'var(--ui-text-secondary)' }
+  const commit = event => {
+    const next = row.setPrefs({ position: event.target.value })
+    event.target.value = String(next.position)
+  }
+  return jsxs('section', {
+    'data-sidebar-section': row.brand,
+    style: { display: 'grid', gap: 6, margin: '12px 0', padding: '10px 12px', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: 8 },
+    children: [
+      jsx('h3', { style: { margin: 0, fontSize: '0.8125rem', fontWeight: 600 }, children: 'Sidebar' }, 'title'),
+      jsxs('div', { style: line, children: [
+        jsx('span', { children: 'Show in the sidebar' }),
+        jsx(Switch, { checked: prefs.show, 'aria-label': 'Show in the sidebar', onCheckedChange: on => row.setPrefs({ show: on }) }),
+      ] }, 'show'),
+      jsxs('div', { style: line, children: [
+        jsx('span', { children: 'Position' }),
+        jsx(Input, {
+          type: 'number', min: SIDEBAR_ROW_MIN, max: SIDEBAR_ROW_MAX, step: 1, inputMode: 'numeric',
+          'aria-label': 'Position', defaultValue: String(prefs.position), style: { width: 72 },
+          onBlur: commit,
+          onKeyDown: event => { if (event.key === 'Enter') commit(event) },
+        }, String(prefs.position)),
+      ] }, 'position'),
+      jsx('p', { style: note, children: 'Lower numbers sit higher. Kanban is 50.' }, 'hint'),
+      prefs.show ? null : jsx('p', { style: note, children: `Open it from the command palette: Open ${row.brand}.` }, 'hidden'),
+    ],
+  })
+}
+// sidebar-row v1 end
+
+// The SDK names the shared module takes (it is import-free, and this file imports `* as sdk`).
+const SIDEBAR_SDK = { SIDEBAR_NAV_AREA: sdk.SIDEBAR_NAV_AREA, Switch: sdk.Switch, Input: sdk.Input, jsx, jsxs, atom: sdk.atom, useValue: sdk.useValue }
+// Hermes' schema form for this plugin, folded beneath its settings page. The same route
+// contrib/settings-pages.ts pluginSettingsRouteHref({ agent }) builds; the agent key is the slug.
+const AGENT_SETTINGS_PATH = `/settings?tab=plugins&agent=${ID}`
+const UPDATE_COMMAND = `hermes plugins update ${ID}`
+const BOX_STYLE = { display: 'grid', gap: 6, margin: '12px 0', padding: '10px 12px', border: '1px solid var(--ui-stroke-tertiary)', borderRadius: 8 }
+const NO_CONNECTION = typeof sdk.atom === 'function' ? sdk.atom(null) : null
+let sidebarRow = null
+
+function openAgentSettings() {
+  if (sdk.host && typeof sdk.host.navigate === 'function') {
+    sdk.host.navigate(AGENT_SETTINGS_PATH)
+  } else {
+    window.location.hash = `#${AGENT_SETTINGS_PATH}`
+  }
+}
+
+/** The two-place install line: Desktop loads this file from its own computer, never from the server. */
+function RemoteNote() {
+  if (typeof sdk.useValue !== 'function' || !NO_CONNECTION) return null
+  const state = sdk.host && sdk.host.state
+  const connection = sdk.useValue((state && state.connectionId) || NO_CONNECTION)
+  if (connection === 'local') return null
+  return jsxs('p', { className: 'sb-note', 'data-sb': 'two-place', children: ['Hermes on another computer? Update this plugin on both. Here: ', jsx('code', { children: UPDATE_COMMAND }), ', then Rescan.'] })
+}
+
+/** Settings, Plugins, Shaderbrücke: the sidebar row, and the way to the agent's settings. */
+function SettingsPage() {
+  return jsxs('div', {
+    'data-sb': 'settings',
+    style: { maxWidth: 640 },
+    children: [
+      sidebarRow ? jsx(SidebarSection, { row: sidebarRow, sdk: SIDEBAR_SDK }, 'sidebar') : null,
+      jsxs('section', {
+        'data-sb': 'agent-settings',
+        style: BOX_STYLE,
+        children: [
+          jsx('h3', { style: { margin: 0, fontSize: '0.8125rem', fontWeight: 600 }, children: 'Agent settings' }, 'title'),
+          jsx('p', { className: 'sb-note', style: { margin: 0 }, children: 'Your name and link in export headers, the credit line, kept versions, project writes and the starter prompt. They apply to the next call.' }, 'what'),
+          jsx('button', { type: 'button', className: 'sb-btn', style: { justifySelf: 'start' }, onClick: openAgentSettings, children: 'Open Agent settings' }, 'open')
+        ]
+      }, 'agent'),
+      jsx(RemoteNote, {}, 'remote')
+    ]
+  })
+}
+
 export default {
   id: ID,
   name: 'Shaderbrücke',
@@ -5780,6 +5957,15 @@ export default {
 
     if (typeof ctx.onDispose === 'function') {
       ctx.onDispose(unmountStyles)
+      ctx.onDispose(() => {
+        if (sidebarRow) sidebarRow.dispose()
+        sidebarRow = null
+      })
+    }
+
+    // Before the route check below: the entry keeps its title on every Desktop that has settings pages.
+    if (typeof ctx.registerSettingsPage === 'function') {
+      ctx.registerSettingsPage({ id: 'settings', title: 'Shaderbrücke', icon: 'symbol-color', render: () => jsx(SettingsPage, {}) })
     }
 
     if (typeof sdk.TOOL_MEDIA_RENDERER_AREA === 'string') {
@@ -5800,8 +5986,8 @@ export default {
 
     ctx.register({ id: 'page', area: sdk.ROUTES_AREA, title: 'Shaderbrücke', data: { path: PAGE_PATH }, render: () => jsx(ShadersPage, {}) })
 
-    if (typeof sdk.SIDEBAR_NAV_AREA === 'string') {
-      ctx.register({ id: 'nav', area: sdk.SIDEBAR_NAV_AREA, data: { codicon: 'symbol-color', label: 'Shaderbrücke', path: PAGE_PATH } })
+    if (typeof sdk.SIDEBAR_NAV_AREA === 'string' && typeof sdk.atom === 'function') {
+      sidebarRow = startSidebarRow(ctx, { brand: 'Shaderbrücke', path: PAGE_PATH, codicon: 'symbol-color', defaultPosition: 52, sdk: SIDEBAR_SDK })
     }
 
     if (typeof sdk.PALETTE_AREA === 'string') {

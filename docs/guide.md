@@ -96,7 +96,8 @@ after a `match`, or when you say `accept_unproven=true`, and the result says whi
 
 ### The Shaderbrücke page
 
-A **Shaderbrücke** row in Desktop's sidebar (and in the command palette) opens the library:
+A **Shaderbrücke** row in Desktop's sidebar (and **Open Shaderbrücke** in the command palette)
+opens the library. Settings → Plugins → Shaderbrücke hides the row or moves it. The library has:
 
 - Every shader as a thumbnail with its name, version count, last edit, states (flat, flash
   warning, imported), licence and lineage. Grid or list, search, filters (state, licence, tag,

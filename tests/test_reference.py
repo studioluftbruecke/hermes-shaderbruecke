@@ -122,7 +122,11 @@ def test_a_disabled_plugin_is_not_resolved(monkeypatch):
     assert references.running_module() is None
 
 
-def test_outside_hermes_there_is_no_shim():
+def test_outside_hermes_there_is_no_shim(monkeypatch):
+    # Simulate "outside Hermes" whatever the environment: check.sh puts Hermes' source on
+    # PYTHONPATH, where agent.context_references imports and make_shim() returns a provider.
+    # None in sys.modules makes that import raise ImportError.
+    monkeypatch.setitem(sys.modules, "agent.context_references", None)
     assert references.make_shim() is None
 
 

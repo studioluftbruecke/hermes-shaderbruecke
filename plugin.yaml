@@ -1,5 +1,5 @@
 name: shaderbruecke
-version: "0.2.1"
+version: "0.2.2"
 description: "Shaderbrücke: make, check, tune and export GLSL shaders with your Hermes agent. The agent writes the shader, a headless Chromium on the host lints, compiles and renders it, the agent looks at its own frames and fixes them, Desktop plays the result live with sliders and keeps every shader on the Shaderbrücke page (versions, forks, licences, a Lab editor, share files and import), and the exports (three.js, R3F, TSL, Shadertoy, agent handoff, and experimental TouchDesigner and ISF) carry a frame-by-frame proof."
 author: "Studio Luftbrücke"
 license: MIT
