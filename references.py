@@ -107,6 +107,8 @@ def expansion(doc: dict, *, latest_version: int, meta: dict | None = None) -> st
         "```glsl",
         str(doc.get("source") or "").rstrip(),
         "```",
+        f"Play it in the chat: shader_library play with id {doc['id']} and version {doc['version']} "
+        "(not a new render).",
         "Frames, exports and other versions: shader_library get with this id. A new version: "
         "shader_render with id " + doc["id"] + ", keeping the tuned values as the `@slider` defaults.",
     ]

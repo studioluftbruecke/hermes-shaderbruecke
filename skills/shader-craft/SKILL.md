@@ -38,6 +38,12 @@ craft rules; the tools carry the schema.
    the result has no `media` key, say why (flat, flash-blocked, compile error) instead of
    pretending it works.
 
+A `MEDIA:` line becomes the live card (canvas and sliders) only when it comes from a
+`shader_render` result or a `shader_library play` or `import` result. Never copy a path from `get`
+or type one yourself: Desktop then shows a plain file with no sliders. To show or tune a version
+that already exists (an `@shader:` reference, "play it", "let me tune it"), call
+`shader_library play` with its id and version, never a new render.
+
 Report the numbers you saw (`luma_mean`, `luma_std`, `checks.motion`, flash verdict), not adjectives.
 
 ## Tunables are sliders
@@ -61,8 +67,8 @@ than this skill; say so instead of pinning the value as a constant.
 
 ## The human's tuned values
 
-When the user moves a slider in Desktop, the value is saved as `tuned_values` on the latest
-version. Every export, the handoff and the proof use the effective value: the tuned value when
+When the user moves a slider in Desktop, the value is saved as `tuned_values` on the version the
+card plays (the Shaders page tunes the latest version). Every export, the handoff and the proof use the effective value: the tuned value when
 there is one, else your default. Export headers show both (`default 0.32, tuned 0.41`).
 
 - Before an export or a new version, call `shader_library("get", id)` and read `tuned_values` and
@@ -75,16 +81,18 @@ there is one, else your default. Export headers show both (`default 0.32, tuned 
 ## Versions, forks, library
 
 - `shader_render(id=...)` writes the next version of an existing shader. An unknown `id` is an
-  error: omit `id` for a new shader.
+  error: omit `id` for a new shader. The same source as the latest version writes nothing and
+  returns that version with `unchanged: true`.
 - `shader_render(parent_id=...)` forks: a new id whose `provenance.parent` points at the original.
 - `shader_library("list")` shows the newest 20, with `q`, `state`, `tag`, `starred`, `archived`
-  filters and a `cursor` for the next page. It is the same library as Desktop's Shaders page.
+  filters and a `cursor` for the next page. It is the same library as Desktop's Shaderbrücke page.
   `get` returns source, sliders, `tuned_values`, `effective_values` and the checks; `fork` copies
   one (pass `version` to fork an older version).
 - `rename`, `tag` (the full new list) and `archive` / `unarchive` organise the library when the
-  user asks. There is no delete: the user deletes from the archive in Desktop.
+  user asks. There is no delete: the user deletes in Desktop.
 - A message can carry `@shader:<id>` or `@shader:<id>@v<n>`: the source, sliders, tuned values,
-  checks and lineage are already in the message. Do not call `get` for it again.
+  checks and lineage are already in the message. Do not call `get` for it again; to play it, call
+  `shader_library play`.
 
 Fork instead of overwriting when the user wants to compare two looks.
 

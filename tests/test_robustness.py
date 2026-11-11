@@ -157,7 +157,8 @@ def test_keep_versions_is_a_declared_setting():
     assert SETTINGS.normalise({})["keep_versions"] == 5
     assert SETTINGS.normalise({"keep_versions": "0"})["keep_versions"] == 1
     assert SETTINGS.normalise({"keep_versions": 3, "credit_line": "false"}) == \
-        {"allow_project_writes": False, "credit_line": False, "keep_versions": 3, "author_name": "", "author_url": ""}
+        {"allow_project_writes": False, "credit_line": False, "keep_versions": 3, "author_name": "", "author_url": "",
+         "starter_prompt": True}
 
 
 def test_author_settings_are_one_line_and_the_url_must_be_a_web_link():

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-CREDIT = "Made with Shaderbrücke — https://github.com/studioluftbruecke/shaderbruecke"
+CREDIT = "Made with Shaderbrücke — https://github.com/studioluftbruecke/hermes-shaderbruecke"
 PRIVATE_LICENCE = "unknown (private; the author has not chosen one)"
 HEADER_TEXT_LIMIT = 200
 

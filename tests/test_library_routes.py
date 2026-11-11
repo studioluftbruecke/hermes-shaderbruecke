@@ -129,17 +129,81 @@ def test_an_inherited_licence_is_refused_with_409_and_the_allowed_list(client, t
     assert client.patch("/api/shaders/b-sea", json={"licence": "CC-BY-NC-SA-4.0"}).status_code == 200
 
 
-def test_delete_needs_the_archive_and_the_typed_name(client, tmp_path):
-    not_archived = client.request("DELETE", "/api/shaders/b-sea", json={"confirm": "sea"})
-    assert not_archived.status_code == 409 and not_archived.json()["detail"]["error"] == "not_archived"
-    assert client.post("/api/shaders/b-sea/archive").json()["row"]["archived"] is True
-    assert client.get("/api/library").json()["total"] == 1
-    assert client.get("/api/library?archived=1").json()["rows"][0]["id"] == "b-sea"
+def _pending_notices(tmp_path):
+    conn = sqlite3.connect(tmp_path / "data" / "data.db")
+    try:
+        return [row[0] for row in conn.execute("SELECT id FROM human_notices WHERE delivered_at IS NULL")]
+    finally:
+        conn.close()
+
+
+def _notice(tmp_path, shader_id, version):
+    conn = sqlite3.connect(tmp_path / "data" / "data.db")
+    record.add_human_notice(conn, shader_id, version)
+    conn.close()
+
+
+@pytest.mark.parametrize("archived", [True, False])
+def test_delete_takes_any_shader_with_the_typed_name(client, tmp_path, archived):
+    if archived:
+        assert client.post("/api/shaders/b-sea/archive").json()["row"]["archived"] is True
+    _notice(tmp_path, "b-sea", 1)
+    project = tmp_path / "project" / "sea.frag"
+    project.parent.mkdir()
+    project.write_text("// an export the user copied into a project")
     wrong = client.request("DELETE", "/api/shaders/b-sea", json={"confirm": "Sea"})
     assert wrong.status_code == 400 and wrong.json()["detail"]["error"] == "confirm_mismatch"
     assert client.request("DELETE", "/api/shaders/b-sea", json={"confirm": "sea"}).json() == {"deleted": "b-sea"}
     assert client.get("/api/shaders/b-sea").status_code == 404
     assert not (tmp_path / "data" / "shaders" / "b-sea").exists()
+    assert _pending_notices(tmp_path) == []
+    assert project.read_text().startswith("// an export")
+    assert client.request("DELETE", "/api/shaders/b-sea", json={"confirm": "sea"}).status_code == 404
+
+
+def test_bulk_delete_checks_first_and_converges_on_a_repeat(client, tmp_path):
+    body = {"ids": ["b-sea", "gone-one", "a-sky"], "confirm": "delete"}
+    wrong = client.post("/api/library/delete", json={**body, "confirm": "Delete"})
+    assert wrong.status_code == 400 and wrong.json()["detail"]["error"] == "confirm_mismatch"
+    bad = client.post("/api/library/delete", json={**body, "ids": ["b-sea", "../etc"]})
+    assert bad.status_code == 400 and bad.json()["detail"]["error"] == "bad_id"
+    empty = client.post("/api/library/delete", json={"ids": [], "confirm": "delete"})
+    assert empty.status_code == 400 and empty.json()["detail"]["error"] == "bad_request"
+    assert client.get("/api/library").json()["total"] == 2, "a refused call deletes nothing"
+    _notice(tmp_path, "a-sky", 2)
+    assert client.post("/api/library/delete", json=body).json() == {"deleted": ["b-sea", "a-sky"],
+                                                                     "missing": ["gone-one"]}
+    assert client.get("/api/library").json()["total"] == 0
+    assert not (tmp_path / "data" / "shaders" / "a-sky").exists()
+    assert _pending_notices(tmp_path) == []
+    assert client.post("/api/library/delete", json=body).json() == {"deleted": [],
+                                                                     "missing": ["b-sea", "gone-one", "a-sky"]}
+
+
+def test_library_ids_lists_every_id_the_paged_query_returns(client, tmp_path):
+    conn = sqlite3.connect(tmp_path / "data" / "data.db")
+    for n in range(7):
+        save(conn, tmp_path / "data", f"c-wave-{n}", 1, name=f"wave {n}")
+    conn.close()
+    client.post("/api/shaders/c-wave-3/archive")
+    for query in ("", "sort=name", "q=wave", "archived=1", "q=zzz"):
+        paged, cursor = [], "0"
+        while cursor is not None:
+            page = client.get(f"/api/library?{query}&limit=3&cursor={cursor}").json()
+            paged += [row["id"] for row in page["rows"]]
+            cursor = page["cursor"]
+        answer = client.get(f"/api/library/ids?{query}&limit=3&cursor=3").json()
+        assert answer == {"ids": paged, "total": len(paged)}, query
+    assert client.get("/api/library/ids?q=wave").json()["total"] == 6
+
+
+def test_settings_route_answers_the_starter_prompt_switch(client, monkeypatch):
+    from shaderbruecke import settings
+    assert client.get("/api/settings").json() == {"starter_prompt": True}
+    monkeypatch.setattr(settings, "_raw_settings", lambda: {"starter_prompt": False})
+    assert client.get("/api/settings").json() == {"starter_prompt": False}
+    monkeypatch.setattr(settings, "_raw_settings", lambda: {"starter_prompt": "on"})
+    assert client.get("/api/settings").json() == {"starter_prompt": True}
 
 
 def test_unarchive_brings_a_shader_back(client):

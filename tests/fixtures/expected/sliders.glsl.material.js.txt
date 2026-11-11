@@ -5,7 +5,7 @@
 // Provenance: origin agent
 // Licence: unknown (private; the author has not chosen one)
 // Set sliders through the exported uniforms; do not rewrite the shader maths.
-// Made with Shaderbrücke — https://github.com/studioluftbruecke/shaderbruecke
+// Made with Shaderbrücke — https://github.com/studioluftbruecke/hermes-shaderbruecke
 
 import * as THREE from 'three'
 
@@ -17,7 +17,7 @@ export const fragmentShader = `// striped plasma — 20261108-000000-000000-test
 // Provenance: origin agent
 // Licence: unknown (private; the author has not chosen one)
 // Set sliders through the exported uniforms; do not rewrite the shader maths.
-// Made with Shaderbrücke — https://github.com/studioluftbruecke/shaderbruecke
+// Made with Shaderbrücke — https://github.com/studioluftbruecke/hermes-shaderbruecke
 
 precision highp float;
 precision highp int;

@@ -79,22 +79,23 @@ def _connect():
 
 
 @router.post("/shaders/{shader_id}/slider_values")
-def post_slider_values(shader_id: str, payload: SliderValues) -> dict:
+def post_slider_values(shader_id: str, payload: SliderValues, version: int | None = None) -> dict:
+    """The chat card names the version it plays; the Shaders page names none (the latest)."""
     conn, base = _storage()
     try:
-        answer = _answer(library_api.set_values(conn, shader_id, payload.values))
-        library_api.refresh_thumb(conn, base, _connect, shader_id)
+        answer = _answer(library_api.set_values(conn, shader_id, payload.values, version))
+        library_api.refresh_thumb(conn, base, _connect, shader_id, version)
         return answer
     finally:
         conn.close()
 
 
 @router.delete("/shaders/{shader_id}/slider_values")
-def delete_slider_values(shader_id: str) -> dict:
+def delete_slider_values(shader_id: str, version: int | None = None) -> dict:
     conn, base = _storage()
     try:
-        answer = _answer(library_api.reset_values(conn, shader_id))
-        library_api.refresh_thumb(conn, base, _connect, shader_id)
+        answer = _answer(library_api.reset_values(conn, shader_id, version))
+        library_api.refresh_thumb(conn, base, _connect, shader_id, version)
         return answer
     finally:
         conn.close()
@@ -118,6 +119,29 @@ def get_library(request: Request) -> dict:
         return _reply(library_api.library_page(conn, base, dict(request.query_params)))
     finally:
         conn.close()
+
+
+@router.get("/library/ids")
+def get_library_ids(request: Request) -> dict:
+    conn, _base = _storage()
+    try:
+        return _reply(library_api.library_ids(conn, dict(request.query_params)))
+    finally:
+        conn.close()
+
+
+@router.post("/library/delete")
+def post_library_delete(payload: dict = Body(default={})) -> dict:
+    conn, base = _storage()
+    try:
+        return _reply(library_api.delete_many(conn, base, payload))
+    finally:
+        conn.close()
+
+
+@router.get("/settings")
+def get_settings() -> dict:
+    return library_api.desktop_settings()
 
 
 @router.get("/thumbs")

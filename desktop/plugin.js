@@ -305,6 +305,42 @@ function parseResult(result) {
   return {}
 }
 
+/** shader_library actions whose `MEDIA:` line the card draws. A `get`, `list`, `share` or `fork`
+ *  result keeps Desktop's plain file: none of them names a `.frag` to play. */
+const CARD_LIBRARY_ACTIONS = new Set(['play', 'import'])
+
+/** Whether the producing call draws the card: every shader_render, and shader_library's `play`
+ *  and `import` (the action read the way the handler reads it). */
+function drawsCard(toolName, args) {
+  if (toolName !== 'shader_library') {
+    return true
+  }
+
+  return CARD_LIBRARY_ACTIONS.has(args && typeof args.action === 'string' ? args.action.toLowerCase() : '')
+}
+
+/**
+ * What the card needs from the call that produced its `.frag`: id, version, title, sliders and
+ * the tuned values to start from. A render keeps its own arguments (the source it rendered, the
+ * name it was given). A library `play` or `import` reads everything from the result, because an
+ * import's arguments hold the pasted original, not the converted source the frag holds.
+ */
+function cardMeta(toolName, args, result) {
+  const meta = parseResult(result)
+  const own = toolName === 'shader_render' && args ? args : {}
+  const argsSource = typeof own.source === 'string' ? own.source : ''
+  const argsName = typeof own.name === 'string' ? own.name : ''
+
+  return {
+    id: typeof meta.id === 'string' ? meta.id : '',
+    version: meta.version || null,
+    name: argsName || (typeof meta.name === 'string' ? meta.name : ''),
+    sliders: Array.isArray(meta.sliders) && meta.sliders.length ? meta.sliders : parseSliders(argsSource),
+    tunedValues: meta.tuned_values || meta.slider_values || null,
+    argsSource
+  }
+}
+
 /** Parse `@slider` annotations into {name, min, max, default, step, label}, like record.parse_sliders. */
 function parseSliders(source) {
   const sliders = []
@@ -647,6 +683,12 @@ function shaderPath(id) {
   return `/shaders/${encodeURIComponent(id)}`
 }
 
+/** The slider-values route of one shader; with a version the values land on that version, without
+ *  one on the latest (the Shaders page). */
+function sliderValuesPath(id, version) {
+  return `${shaderPath(id)}/slider_values${version ? `?version=${encodeURIComponent(version)}` : ''}`
+}
+
 /** A short stable hash (FNV-1a) of a text, for React keys that must change with the source. */
 function textHash(text) {
   let hash = 0x811c9dc5
@@ -708,17 +750,18 @@ function refreshAfterTuning(id) {
 /**
  * The slider values of one stored shader, shared by the chat card and the detail sheet: a move
  * reaches the player at once and is saved (POST /slider_values) once after COMMIT_DELAY_MS, on
- * blur or on unmount; Reset all DELETEs them. Without an `id` nothing is saved. `notify(kind,
- * error)` words the outcome: 'saved', 'save-failed', 'reset' or 'reset-failed'.
+ * blur or on unmount; Reset all DELETEs them. Without an `id` nothing is saved. The card passes
+ * the `version` it plays, so its values land there; the sheet passes none (the latest).
+ * `notify(kind, error)` words the outcome: 'saved', 'save-failed', 'reset' or 'reset-failed'.
  */
-function useSliderCommit({ id, sliders, initial, controlRef, notify }) {
+function useSliderCommit({ id, version = null, sliders, initial, controlRef, notify }) {
   const [values, setValues] = useState(() => startingValues(sliders, initial))
   const valuesRef = useRef(values)
   const timer = useRef(0)
   const dirty = useRef(false)
   const touched = useRef(false)
-  const latest = useRef({ id, notify, sliders })
-  latest.current = { id, notify, sliders }
+  const latest = useRef({ id, version, notify, sliders })
+  latest.current = { id, version, notify, sliders }
 
   const push = next => {
     for (const [name, value] of Object.entries(next)) {
@@ -745,7 +788,7 @@ function useSliderCommit({ id, sliders, initial, controlRef, notify }) {
     }
 
     dirty.current = false
-    apiCall(`${shaderPath(target)}/slider_values`, { method: 'POST', body: { values: valuesRef.current } })
+    apiCall(sliderValuesPath(target, latest.current.version), { method: 'POST', body: { values: valuesRef.current } })
       .then(() => {
         latest.current.notify('saved')
         refreshAfterTuning(target)
@@ -777,7 +820,7 @@ function useSliderCommit({ id, sliders, initial, controlRef, notify }) {
       return
     }
 
-    apiCall(`${shaderPath(target)}/slider_values`, { method: 'DELETE' })
+    apiCall(sliderValuesPath(target, latest.current.version), { method: 'DELETE' })
       .then(() => {
         latest.current.notify('reset')
         refreshAfterTuning(target)
@@ -837,13 +880,20 @@ const TARGET_NAMES = {
   shadertoy: ['Shadertoy', 'Shadertoy tab'],
   td: ['TouchDesigner', 'TouchDesigner GLSL TOP'],
   isf: ['ISF', 'ISF shader'],
-  agent: ['Agent', 'Agent handoff']
+  agent: ['Agent', 'Coding agent (three.js)']
 }
+
+const AGENT_HINT = 'Paste into Cursor, Claude Code or Codex in your web project.'
 
 function targetName(row, long) {
   const names = TARGET_NAMES[row.id]
 
   return names ? names[long ? 1 : 0] : row.label || row.id
+}
+
+/** The request an "Ask Hermes to fix it" toast action drafts after a failed or unproven export. */
+function exportFixRequest(title, id, version, row, problem) {
+  return `The ${targetName(row, true)} export of the shader "${title}" (id ${id}${version ? `, v${version}` : ''}) ${problem}. Fix it with shader_export and prove it.`
 }
 
 /** A target can be copied when its file exists, or always for the agent handoff (generated). */
@@ -904,7 +954,7 @@ const CSS = `
 .sb-link{border:0;background:none;padding:2px 6px;margin-right:-6px;border-radius:6px;color:var(--ui-text-secondary);font:inherit;font-size:12px;cursor:pointer}
 .sb-link:hover{color:var(--ui-text-primary);background:var(--ui-control-hover-background)}
 .sb-row{display:grid;grid-template-columns:minmax(6rem,9rem) 1fr 3.4rem;align-items:center;gap:12px;min-height:28px}
-.sb-label{color:var(--ui-text-secondary);cursor:default;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb-label{color:var(--ui-text-secondary);cursor:default;user-select:none;overflow-wrap:break-word;line-height:1.25}
 .sb-label[data-tuned=true]{color:var(--ui-text-primary)}
 .sb-val{font:12px/1 var(--dt-font-mono);text-align:right;font-variant-numeric:tabular-nums;color:var(--ui-text-primary)}
 .sb-range{-webkit-appearance:none;appearance:none;width:100%;height:20px;margin:0;background:transparent;accent-color:var(--ui-accent);cursor:pointer}
@@ -936,13 +986,18 @@ const CSS = `
 .sb-toast{margin-left:auto;display:inline-flex;align-items:center;gap:6px;min-height:28px;font-size:12px;color:var(--ui-text-secondary);max-width:100%}
 .sb-toast .sb-btn{height:24px;padding:0 8px;font-size:12px}
 .sb-toast-text{min-width:0}
-.sb-menu{position:absolute;left:12px;bottom:46px;z-index:20;width:min(452px,calc(100% - 24px));padding:4px;border-radius:10px;background:var(--ui-bg-elevated);border:1px solid var(--ui-stroke-secondary);box-shadow:0 14px 36px rgb(0 0 0/.3),0 2px 6px rgb(0 0 0/.12)}
-.sb-mrow{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;padding:6px 6px 6px 8px;border-radius:7px}
+.sb-menu{padding:4px;border-radius:10px;background:var(--ui-bg-elevated);color:var(--ui-text-primary);font-size:13px;line-height:1.45;box-shadow:0 14px 36px rgb(0 0 0/.3),0 2px 6px rgb(0 0 0/.12)}
+.sb-menu *{box-sizing:border-box}
+.sb-menu :focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px}
+.sb-mstatus{padding:6px 8px;color:var(--ui-text-secondary)}
+.sb-mrow{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;padding:6px 6px 6px 8px;border-radius:7px}
+.sb-mmain{flex:1 1 12rem;min-width:0}
 .sb-mrow:hover,.sb-mrow:focus-within{background:var(--ui-control-hover-background)}
 .sb-mname{font-weight:500;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
 .sb-mname small{font-size:11.5px;font-weight:400}
 .sb-mfile{font:11px/1.4 var(--dt-font-mono);color:var(--ui-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sb-mact{display:flex;gap:2px}
+.sb-mhint{font-size:11.5px;color:var(--ui-text-secondary)}
+.sb-mact{display:flex;gap:2px;margin-left:auto}
 .sb-mact .sb-btn{height:26px;padding:0 8px;font-size:12px}
 .sb-code{margin:0 12px 12px;border:1px solid var(--ui-stroke-tertiary);border-radius:8px;max-height:320px;overflow:auto;background:var(--ui-bg-tertiary)}
 .sb-code ol{list-style:none;margin:0;padding:6px 0;font:11.5px/1.6 var(--dt-font-mono);counter-reset:sb-line}
@@ -1049,19 +1104,43 @@ function CodeView({ source, findings }) {
   })
 }
 
-function ExportMenu({ id, targets, busy, onCopy, onSend, onExport, onAsk, onClose, menuRef }) {
+const MENU_STYLE = { width: 'min(440px, calc(100vw - 32px))', maxHeight: 'var(--radix-popover-content-available-height)', overflowY: 'auto' }
+
+/**
+ * The Export menu of the chat card and the detail sheet, in Desktop's Popover: Radix places it
+ * inside the window and owns Escape, outside clicks and the focus return to the trigger.
+ * `refocusRef.current = false` before a close keeps focus where an action put it (the composer).
+ */
+function ExportPopover({ id, open, onOpenChange, refocusRef, trigger, children }) {
+  return jsxs(sdk.Popover, {
+    open,
+    onOpenChange,
+    children: [
+      jsx(sdk.PopoverTrigger, { asChild: true, children: trigger }),
+      jsx(sdk.PopoverContent, {
+        id,
+        side: 'bottom',
+        align: 'end',
+        collisionPadding: 12,
+        className: 'sb-menu',
+        style: MENU_STYLE,
+        onCloseAutoFocus: event => {
+          if (!refocusRef.current) {
+            event.preventDefault()
+          }
+
+          refocusRef.current = true
+        },
+        children
+      })
+    ]
+  })
+}
+
+function ExportMenu({ targets, busy, onCopy, onSend, onExport }) {
   return jsx('div', {
-    ref: menuRef,
-    id,
-    className: 'sb-menu',
     role: 'group',
     'aria-label': 'Export targets',
-    onKeyDown: event => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        onClose(true)
-      }
-    },
     children: targets.map(row => {
       const verdict = verdictOf(row)
       const name = targetName(row, true)
@@ -1073,7 +1152,7 @@ function ExportMenu({ id, targets, busy, onCopy, onSend, onExport, onAsk, onClos
         'data-target': row.id,
         children: [
           jsxs('div', {
-            style: { minWidth: 0 },
+            className: 'sb-mmain',
             children: [
               jsxs('div', {
                 className: 'sb-mname',
@@ -1083,8 +1162,9 @@ function ExportMenu({ id, targets, busy, onCopy, onSend, onExport, onAsk, onClos
                   row.status === 'experimental' ? jsx('small', { className: 'sb-none', children: 'experimental' }) : null
                 ]
               }),
-              jsx('div', { className: 'sb-mfile', title: row.proof && row.proof.why ? row.proof.why : undefined,
-                children: row.main_file || row.label })
+              row.id === 'agent'
+                ? jsx('div', { className: 'sb-mhint', children: AGENT_HINT })
+                : jsx('div', { className: 'sb-mfile', title: row.proof && row.proof.why ? row.proof.why : undefined, children: row.main_file || row.label })
             ]
           }),
           jsx('div', {
@@ -1094,11 +1174,8 @@ function ExportMenu({ id, targets, busy, onCopy, onSend, onExport, onAsk, onClos
                   jsx('button', { key: 'copy', type: 'button', className: 'sb-btn sb-ghost', 'aria-label': `Copy ${name} file`, onClick: () => onCopy(row), children: 'Copy file' }),
                   jsx('button', { key: 'send', type: 'button', className: 'sb-btn sb-ghost', 'aria-label': `Send ${name} to chat`, onClick: () => onSend(row), children: 'Send to chat' })
                 ]
-              : [
-                  jsx('button', { key: 'export', type: 'button', className: 'sb-btn sb-ghost', disabled: Boolean(busy), 'aria-label': `Export ${name} now`, onClick: () => onExport(row),
-                    children: working ? [icon('loading', 'codicon-modifier-spin'), ' Exporting'] : 'Export now' }),
-                  jsx('button', { key: 'ask', type: 'button', className: 'sb-btn sb-ghost', 'aria-label': `Ask Hermes to export ${name}`, onClick: () => onAsk(row), children: 'Ask Hermes' })
-                ]
+              : jsx('button', { type: 'button', className: 'sb-btn sb-ghost', disabled: Boolean(busy), 'aria-label': `Export ${name} now`, onClick: () => onExport(row),
+                  children: working ? [icon('loading', 'codicon-modifier-spin'), ' Exporting'] : 'Export now' })
           })
         ]
       })
@@ -1122,12 +1199,11 @@ const STATE_WORDS = {
   lost: 'Preview lost'
 }
 
-function ShaderCanvas({ file, args, result, fallback, sessionId }) {
+function ShaderCanvas({ file, toolName, args, result, fallback, sessionId }) {
   const canvasRef = useRef(null)
   const controlRef = useRef(null)
   const timeRef = useRef(null)
-  const exportButtonRef = useRef(null)
-  const menuRef = useRef(null)
+  const refocusRef = useRef(true)
   const [source, setSource] = useState(null)
   const [state, dispatch] = useReducer(cardReducer, { phase: 'loading', reason: '', findings: null, log: '' })
   const [toast, setToast] = useState(null)
@@ -1138,18 +1214,21 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
   const [scrub, setScrub] = useState(1)
   // A live turn hands `result` over as a JSON string, a reloaded transcript as an object. Parse
   // once per distinct raw value, so a host re-render never produces new arrays.
-  const meta = useMemo(() => parseResult(result), [result])
-  const argsSource = args && typeof args.source === 'string' ? args.source : ''
-  const argsName = args && typeof args.name === 'string' ? args.name : ''
-  const shaderId = typeof meta.id === 'string' ? meta.id : ''
-  const version = meta.version || (info && info.version) || null
-  const versionQuery = meta.version ? `?version=${encodeURIComponent(meta.version)}` : ''
-  const rawTitle = argsName || meta.name || (info && info.name) || file.name
-  const title = rawTitle ? rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1) : 'Shader'
-  const parsedSliders = useMemo(
-    () => (Array.isArray(meta.sliders) && meta.sliders.length ? meta.sliders : parseSliders(argsSource)),
-    [meta, argsSource]
+  // The host may build a new `args` object per render (the deferred-tool bridge), so the memo keys
+  // on the two strings a render's card reads from it.
+  const argsSourceKey = args && typeof args.source === 'string' ? args.source : ''
+  const argsNameKey = args && typeof args.name === 'string' ? args.name : ''
+  const card = useMemo(
+    () => cardMeta(toolName, { source: argsSourceKey, name: argsNameKey }, result),
+    [toolName, argsSourceKey, argsNameKey, result]
   )
+  const { argsSource } = card
+  const shaderId = card.id
+  const version = card.version || (info && info.version) || null
+  const versionQuery = card.version ? `?version=${encodeURIComponent(card.version)}` : ''
+  const rawTitle = card.name || (info && info.name) || file.name
+  const title = rawTitle ? rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1) : 'Shader'
+  const parsedSliders = card.sliders
   const signature = sliderSignature(parsedSliders)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const sliders = useMemo(() => parsedSliders, [signature])
@@ -1168,8 +1247,9 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
 
   const tuning = useSliderCommit({
     id: shaderId,
+    version: card.version,
     sliders,
-    initial: meta.tuned_values || meta.slider_values,
+    initial: card.tunedValues,
     controlRef,
     notify: (kind, error) => {
       if (kind === 'saved' || kind === 'reset') {
@@ -1241,7 +1321,7 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
   }, [shaderId])
 
   useEffect(() => {
-    const next = startingValues(sliders, meta.tuned_values || meta.slider_values)
+    const next = startingValues(sliders, card.tunedValues)
 
     for (const name of Object.keys(next)) {
       if (Number.isFinite(valuesRef.current[name])) {
@@ -1288,41 +1368,9 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
     }
   }, [source, signature, reload])
 
-  // An open menu closes on a click outside it or on Escape, and focus goes back to its button.
-  useEffect(() => {
-    if (!menuOpen) {
-      return
-    }
-
-    const onDown = event => {
-      if (menuRef.current && !menuRef.current.contains(event.target) && !exportButtonRef.current?.contains(event.target)) {
-        setMenuOpen(false)
-      }
-    }
-
-    const onKey = event => {
-      if (event.key === 'Escape') {
-        setMenuOpen(false)
-        exportButtonRef.current?.focus()
-      }
-    }
-
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    menuRef.current?.querySelector('button')?.focus()
-
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen])
-
   const closeMenu = refocus => {
+    refocusRef.current = refocus
     setMenuOpen(false)
-
-    if (refocus) {
-      exportButtonRef.current?.focus()
-    }
   }
 
   const setSlider = tuning.set
@@ -1347,12 +1395,11 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
     return inserted
   }
 
-  const askHermes = row => {
+  const askToFixExport = (row, problem) => {
     closeMenu(false)
-    const name = targetName(row, true)
 
     return insert(
-      `Export the shader "${title}" (id ${shaderId}${version ? `, v${version}` : ''}) as ${name} with shader_export, and prove it.`,
+      exportFixRequest(title, shaderId, version, row, problem),
       'Request put in the composer. Send it when ready.',
       'The composer did not take it, so the request is on the clipboard.'
     )
@@ -1379,7 +1426,7 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
       await loadTargets()
 
       if (payload && payload.success === false) {
-        say(`${name} export failed: ${payload.error || 'no reason given'}.`, 'err', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+        say(`${name} export failed: ${payload.error || 'no reason given'}.`, 'err', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `failed: ${payload.error || 'no reason given'}`) }])
       } else {
         const verdict = payload && payload.proof ? payload.proof.verdict : 'not_proven'
         const why = payload && payload.proof && payload.proof.why ? ` (${payload.proof.why})` : ''
@@ -1387,14 +1434,14 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
         if (verdict === 'match') {
           say(`${name} exported and proven: match.`, 'ok')
         } else if (verdict === 'differs') {
-          say(`${name} exported, but the proof differs${why}.`, 'warn', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+          say(`${name} exported, but the proof differs${why}.`, 'warn', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `has a proof that differs${why}`) }])
         } else {
-          say(`${name} exported, not proven${why}.`, 'warn', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+          say(`${name} exported, not proven${why}.`, 'warn', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `is not proven${why}`) }])
         }
       }
     } catch (error) {
       const detail = restProblem(error).message
-      say(`${name} export failed: ${detail || 'the plugin API did not answer'}.`, 'err', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+      say(`${name} export failed: ${detail || 'the plugin API did not answer'}.`, 'err', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `failed: ${detail || 'the plugin API did not answer'}`) }])
     } finally {
       setBusy('')
     }
@@ -1410,12 +1457,9 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
       const { status, message: detail } = restProblem(error)
 
       if (status === 409) {
-        say(`${name} isn't exported yet.`, 'warn', [
-          { label: 'Export now', run: () => exportNow(row) },
-          { label: 'Ask Hermes', run: () => askHermes(row) }
-        ])
+        say(`${name} isn't exported yet.`, 'warn', [{ label: 'Export now', run: () => exportNow(row) }])
       } else {
-        say(`Could not read ${name}: ${detail || 'the plugin API did not answer'}.`, 'err', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+        say(`Could not read ${name}: ${detail || 'the plugin API did not answer'}.`, 'err')
       }
 
       return null
@@ -1442,7 +1486,6 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
     }
   }
 
-  const copyForAgent = () => copyFile({ id: 'agent', label: 'Agent handoff', exported: true })
   const findings = useMemo(() => (source ? lintSource(source, sliders.map(slider => slider.name)) : []), [source, sliders])
 
   if (state.phase === 'unavailable' || state.phase === 'nowebgl') {
@@ -1654,18 +1697,20 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
     ? jsxs('footer', {
         className: `sb-actions${proofStrip ? '' : ' sb-actions-only'}`,
         children: [
-          jsx('button', { type: 'button', className: 'sb-btn sb-primary', onClick: copyForAgent, children: [icon('copy'), 'Copy for agent'] }),
-          jsx('button', {
-            type: 'button',
-            ref: exportButtonRef,
-            className: 'sb-btn',
-            'aria-haspopup': 'true',
-            'aria-expanded': menuOpen ? 'true' : 'false',
-            'aria-controls': menuId,
-            disabled: !targets.length,
-            title: targets.length ? undefined : 'The plugin API did not list any targets',
-            onClick: () => setMenuOpen(open => !open),
-            children: ['Export', icon('chevron-down')]
+          jsx(ExportPopover, {
+            id: menuId,
+            open: menuOpen,
+            onOpenChange: setMenuOpen,
+            refocusRef,
+            trigger: jsx('button', {
+              type: 'button',
+              className: 'sb-btn sb-primary',
+              'aria-controls': menuId,
+              disabled: !targets.length,
+              title: targets.length ? undefined : 'The plugin API did not list any targets',
+              children: ['Export', icon('chevron-down')]
+            }),
+            children: jsx(ExportMenu, { targets, busy, onCopy: copyFile, onSend: sendToChat, onExport: exportNow })
           }),
           jsx('button', {
             type: 'button',
@@ -1675,10 +1720,7 @@ function ShaderCanvas({ file, args, result, fallback, sessionId }) {
             children: [icon('code'), codeOpen ? 'Hide code' : 'Show code']
           }),
           jsx('span', { className: 'sb-sr', role: 'status', 'aria-live': 'polite', children: toast ? toast.text : '' }),
-          toastRow,
-          menuOpen
-            ? jsx(ExportMenu, { id: menuId, targets, busy, menuRef, onCopy: copyFile, onSend: sendToChat, onExport: exportNow, onAsk: askHermes, onClose: closeMenu })
-            : null
+          toastRow
         ]
       })
     : jsxs('footer', {
@@ -1722,7 +1764,131 @@ const PAGE_PATH = '/shaderbruecke'
 const QK = 'shaderbruecke'
 const LONG_MS = 180000
 const HOVER_DELAY_MS = 140
-const STARTER_PROMPT = 'Make a shader of a slow ocean swell at dusk, with sliders for wave height and colour.'
+// sb:starter-prompts:begin
+const STARTER_PROMPTS = [
+  "Make a shader of fireflies drifting over a dark pond, with sliders for swarm size and glow.",
+  "Make a shader of a slow ocean swell rolling in at dusk, with sliders for wave height and water colour.",
+  "Make a shader of an aurora curtain swaying over snowy hills, with sliders for ribbon width and colour shift.",
+  "Make a shader of lava lamp blobs rising and merging, with sliders for blob count and warmth.",
+  "Make a shader of a desert dune field shifting in the wind, with sliders for dune height and sand colour.",
+  "Make a shader of koi fish circling in a garden pool, with sliders for fish count and ripple strength.",
+  "Make a shader of a nebula slowly churning in deep space, with sliders for dust density and hue.",
+  "Make a shader of rain sliding down a window at night, with sliders for drop size and city glow.",
+  "Make a shader of a candle flame swaying in a draught, with sliders for flame height and warmth.",
+  "Make a shader of jellyfish pulsing through a dark sea, with sliders for jellyfish count and glow.",
+  "Make a shader of clouds drifting over a mountain ridge, with sliders for cloud cover and wind speed.",
+  "Make a shader of a kaleidoscope of stained glass turning slowly, with sliders for segment count and saturation.",
+  "Make a shader of a field of wheat waving in a breeze, with sliders for wind strength and golden tint.",
+  "Make a shader of ink drops blooming in water, with sliders for spread speed and ink colour.",
+  "Make a shader of a starfield streaming past a spaceship, with sliders for star density and speed.",
+  "Make a shader of a coral reef with swaying sea fans, with sliders for current strength and colour richness.",
+  "Make a shader of smoke curling up from incense, with sliders for curl amount and smoke thickness.",
+  "Make a shader of a sunrise over a misty lake, with sliders for mist density and sun height.",
+  "Make a shader of snow falling over a pine forest, with sliders for snowfall rate and flake size.",
+  "Make a shader of a spinning vinyl record with soft reflections, with sliders for spin speed and groove depth.",
+  "Make a shader of bubbles rising in a glass of soda, with sliders for bubble count and fizz speed.",
+  "Make a shader of a tide pool with sunlight caustics, with sliders for caustic scale and water depth.",
+  "Make a shader of a paper lantern festival floating upward, with sliders for lantern count and drift.",
+  "Make a shader of a slow plasma wave in pastel colours, with sliders for wave scale and softness.",
+  "Make a shader of leaves tumbling across an autumn path, with sliders for leaf count and wind gusts.",
+  "Make a shader of a whirlpool turning in a dark river, with sliders for swirl strength and foam.",
+  "Make a shader of a glowing jungle floor with drifting spores, with sliders for spore density and glow.",
+  "Make a shader of a lighthouse beam sweeping through fog, with sliders for beam width and fog density.",
+  "Make a shader of a honeycomb pattern breathing in and out, with sliders for cell size and amber tint.",
+  "Make a shader of a moonlit sea with a silver path, with sliders for moon size and wave calm.",
+  "Make a shader of a sandstorm rolling over a canyon, with sliders for dust amount and sky colour.",
+  "Make a shader of marbled paper slowly swirling, with sliders for swirl detail and palette shift.",
+  "Make a shader of a cosy fireplace with drifting embers, with sliders for ember count and fire height.",
+  "Make a shader of a field of tulips swaying in spring, with sliders for flower density and breeze.",
+  "Make a shader of a slow-turning galaxy spiral, with sliders for arm count and core brightness.",
+  "Make a shader of waves of silk folding over each other, with sliders for fold depth and sheen.",
+  "Make a shader of a quiet snow globe being gently shaken, with sliders for flake count and settle speed.",
+  "Make a shader of a rainforest waterfall with rising mist, with sliders for water flow and mist amount.",
+  "Make a shader of a topographic map with flowing contour lines, with sliders for line spacing and flow speed.",
+  "Make a shader of glowing plankton swirling behind a boat, with sliders for wake length and glow colour.",
+  "Make a shader of a sunset over rolling hills, with sliders for hill height and sky warmth.",
+  "Make a shader of a mossy stream flowing over stones, with sliders for flow speed and stone size.",
+  "Make a shader of a cloud of butterflies fluttering upward, with sliders for butterfly count and wing colour.",
+  "Make a shader of a retro synthwave road scrolling to the horizon, with sliders for grid speed and sun size.",
+  "Make a shader of molten gold pouring and cooling, with sliders for pour speed and heat glow.",
+  "Make a shader of a misty bamboo forest swaying, with sliders for stalk density and mist.",
+  "Make a shader of a slowly rotating crystal with soft refraction, with sliders for facet count and tint.",
+  "Make a shader of dandelion seeds floating on the wind, with sliders for seed count and wind drift.",
+  "Make a shader of ripples spreading from raindrops on a puddle, with sliders for rain rate and ripple size.",
+  "Make a shader of a cityscape at night with drifting fog, with sliders for building height and fog density.",
+  "Make a shader of a field of stars reflected in a still lake, with sliders for star density and water calm.",
+  "Make a shader of a flowing river of liquid chrome, with sliders for flow speed and reflectivity.",
+  "Make a shader of a slowly blooming mandala of petals, with sliders for petal count and bloom speed.",
+  "Make a shader of a cave with glowing crystals and drifting dust, with sliders for crystal count and glow.",
+  "Make a shader of seaweed swaying in a kelp forest, with sliders for current speed and kelp density.",
+  "Make a shader of a warm desert mirage shimmering over sand, with sliders for heat haze and horizon height.",
+  "Make a shader of soap film colours swirling on a bubble, with sliders for film thickness and swirl.",
+  "Make a shader of a tea cup with steam curling upward, with sliders for steam amount and cup warmth.",
+  "Make a shader of a slow meteor shower over a meadow, with sliders for meteor count and trail length.",
+  "Make a shader of a rolling fog bank over a harbour, with sliders for fog height and drift speed.",
+  "Make a shader of an underwater sun shaft scene, with sliders for ray count and water murk.",
+  "Make a shader of a wind chime of glass shards turning slowly, with sliders for shard count and colour.",
+  "Make a shader of a cherry blossom tree shedding petals, with sliders for petal rate and pink tint.",
+  "Make a shader of a gentle hillside with grazing clouds of sheep, with sliders for flock size and grass colour.",
+  "Make a shader of a woven tapestry rippling in a breeze, with sliders for weave scale and ripple strength.",
+  "Make a shader of an hourglass with sand pouring through, with sliders for pour rate and sand colour.",
+  "Make a shader of a mountain lake with drifting ice floes, with sliders for floe count and water colour.",
+  "Make a shader of planets orbiting a quiet star, with sliders for planet count and orbit speed.",
+  "Make a shader of a glacier cracking and drifting blue ice, with sliders for crack density and ice tint.",
+  "Make a shader of a gentle tide washing over pebbles, with sliders for tide reach and foam.",
+  "Make a shader of a sky full of kites dancing on the wind, with sliders for kite count and wind strength.",
+  "Make a shader of a slowly melting ice cream sundae, with sliders for melt speed and topping colour.",
+  "Make a shader of floating islands drifting in the clouds, with sliders for island count and cloud height.",
+  "Make a shader of a forest canopy with sun dapples moving, with sliders for leaf density and sun angle.",
+  "Make a shader of origami cranes gliding in circles, with sliders for crane count and paper colour.",
+  "Make a shader of a hot air balloon rising over valleys, with sliders for rise speed and valley haze.",
+  "Make a shader of a slow sea of rolling hills made of velvet, with sliders for hill scale and sheen.",
+  "Make a shader of an abstract flow field of drifting particles, with sliders for particle count and curl.",
+  "Make a shader of a lily pond with dragonflies hovering, with sliders for lily count and water tint.",
+  "Make a shader of a slow-rotating geode with sparkling crystals, with sliders for crystal size and hue.",
+  "Make a shader of a tidal estuary with winding channels, with sliders for channel width and water level.",
+  "Make a shader of chalk dust drifting through a sunbeam, with sliders for dust density and beam width.",
+  "Make a shader of a calm harbour with boats bobbing, with sliders for boat count and wave size.",
+  "Make a shader of a slow solar eclipse with a soft corona, with sliders for corona size and sky darkness.",
+  "Make a shader of a drifting cloudscape seen from a plane, with sliders for cloud density and altitude.",
+  "Make a shader of a garden of glowing mushrooms at night, with sliders for mushroom count and glow colour.",
+  "Make a shader of an endless tunnel of soft rings, with sliders for ring spacing and travel speed.",
+  "Make a shader of a swarm of starlings forming shapes, with sliders for flock size and turn rate.",
+  "Make a shader of hot springs steaming in the snow, with sliders for steam amount and water colour.",
+  "Make a shader of water flowing over a rocky weir, with sliders for flow rate and foam amount.",
+  "Make a shader of a beach at low tide with wet sand reflections, with sliders for sky colour and sand shine.",
+  "Make a shader of a breathing gradient of warm and cool tones, with sliders for breath speed and contrast.",
+  "Make a shader of an octopus arm curling through coral, with sliders for curl speed and skin colour.",
+  "Make a shader of a wheat-coloured prairie under drifting clouds, with sliders for cloud speed and grass height.",
+  "Make a shader of glowing ribbons tying themselves in knots, with sliders for ribbon count and twist.",
+  "Make a shader of a sleepy village under falling snow, with sliders for snowfall and window warmth.",
+  "Make a shader of the surface of a sun with slow granules, with sliders for granule size and heat.",
+  "Make a shader of a flock of paper boats drifting downstream, with sliders for boat count and current.",
+  "Make a shader of a quiet volcano with a slow lava glow, with sliders for lava flow and smoke.",
+  "Make a shader of a mosaic of tiles gently shifting colour, with sliders for tile size and colour speed."
+]
+// sb:starter-prompts:end
+
+let lastPrompt = ''
+
+/** A random starter prompt, never the one picked last. */
+function pickPrompt() {
+  const pool = STARTER_PROMPTS.filter(prompt => prompt !== lastPrompt)
+  lastPrompt = pool[Math.floor(Math.random() * pool.length)]
+
+  return lastPrompt
+}
+
+/** The `starter_prompt` setting, read fresh: Desktop's query cache would keep an old value for a minute. */
+async function starterPromptOn() {
+  try {
+    const answer = await apiCall('/settings')
+
+    return !(answer && answer.starter_prompt === false)
+  } catch {
+    return true
+  }
+}
 
 let pluginStore = null
 let pluginFiles = null
@@ -2096,6 +2262,10 @@ async function draftInNewChat(text, title) {
 
         await host.openSession(stored, { intent: 'tab' })
 
+        if (!text) {
+          return { ok: true, via: 'session' }
+        }
+
         if (await setDraftConfirmed(composer, runtime, text)) {
           return { ok: true, via: 'session' }
         }
@@ -2109,7 +2279,7 @@ async function draftInNewChat(text, title) {
     try {
       host.newChat()
 
-      if (await setDraftConfirmed(composer, null, text)) {
+      if (!text || (await setDraftConfirmed(composer, null, text))) {
         return { ok: true, via: 'newChat' }
       }
     } catch {
@@ -2117,7 +2287,7 @@ async function draftInNewChat(text, title) {
     }
   }
 
-  return { ok: false, via: (await copyText(text)) ? 'clipboard' : 'none' }
+  return { ok: false, via: text && (await copyText(text)) ? 'clipboard' : 'none' }
 }
 
 function shaderRef(id, version) {
@@ -2142,10 +2312,12 @@ async function continueInChat(row, version) {
 }
 
 async function newShader(prompt) {
-  const text = prompt || STARTER_PROMPT
+  const text = (await starterPromptOn()) ? prompt || pickPrompt() : ''
   const result = await draftInNewChat(text, 'New shader')
 
-  if (result.ok) {
+  if (result.ok && !text) {
+    say('A new chat is open. Describe your shader and send.', 'ok')
+  } else if (result.ok) {
     say('A new chat has a starter prompt. Describe your shader and send.', 'ok')
   } else if (result.via === 'clipboard') {
     say('Could not open a chat, so the starter prompt is on the clipboard.', 'warn')
@@ -2546,7 +2718,7 @@ function SelectBox({ row, selected, onSelect }) {
       tabIndex: -1,
       checked: selected,
       'aria-label': `Select ${displayName(row.name)}`,
-      onChange: () => onSelect(row.id)
+      onChange: event => onSelect(row.id, Boolean(event.nativeEvent && event.nativeEvent.shiftKey))
     })
   })
 }
@@ -2782,7 +2954,7 @@ function PickUp({ row, image, onOpen }) {
 
 function EmptyState({ archived, filtered, onClear }) {
   if (archived) {
-    return jsxs('div', { className: 'sb-empty', children: [icon('archive'), jsx('h2', { children: 'Nothing archived' }), jsx('p', { children: 'Archived shaders wait here. Delete forever is only possible from this view.' })] })
+    return jsxs('div', { className: 'sb-empty', children: [icon('archive'), jsx('h2', { children: 'Nothing archived' }), jsx('p', { children: 'Archived shaders wait here.' })] })
   }
 
   if (filtered) {
@@ -2804,13 +2976,29 @@ function EmptyState({ archived, filtered, onClear }) {
       icon('symbol-color'),
       jsx('h2', { children: 'No shaders yet' }),
       jsx('p', { children: 'Ask Hermes for a shader in any chat. Every render lands here with a preview, its versions and its sliders.' }),
-      jsx('div', { className: 'sb-prompt', children: STARTER_PROMPT }),
+      jsx(FirstPrompt, {})
+    ]
+  })
+}
+
+/** The empty library's example prompt, one per mount, gone while the setting is off. */
+function FirstPrompt() {
+  const [prompt] = useState(pickPrompt)
+  const settings = sdk.useQuery({ queryKey: qkey('settings'), queryFn: () => apiCall('/settings'), staleTime: 0 })
+  const shown = settings.isError || Boolean(settings.data && settings.data.starter_prompt !== false)
+
+  return jsxs('div', {
+    style: { display: 'contents' },
+    children: [
+      shown ? jsx('div', { className: 'sb-prompt', children: prompt }) : null,
       jsxs('div', {
         className: 'sb-pick-actions',
         style: { justifyContent: 'center' },
         children: [
-          jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'empty-new', onClick: () => newShader(STARTER_PROMPT), children: [icon('add'), 'Start in a new chat'] }),
-          jsx('button', { type: 'button', className: 'sb-btn', onClick: () => copyText(STARTER_PROMPT).then(ok => say(ok ? 'Prompt copied.' : 'Could not copy the prompt.', ok ? 'ok' : 'err')), children: 'Copy prompt' })
+          jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'empty-new', onClick: () => newShader(shown ? prompt : ''), children: [icon('add'), 'Start in a new chat'] }),
+          shown
+            ? jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'copy-prompt', onClick: () => copyText(prompt).then(ok => say(ok ? 'Prompt copied.' : 'Could not copy the prompt.', ok ? 'ok' : 'err')), children: 'Copy prompt' })
+            : null
         ]
       })
     ]
@@ -2917,6 +3105,7 @@ function ShadersPage() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const bulkBusyRef = useRef(false)
   const [selected, setSelected] = useState(() => new Set())
+  const [deleting, setDeleting] = useState(false)
   const [hoverId, setHoverId] = useState(null)
   const [activeIndex, setActiveIndex] = useState(0)
   const [adoptJob, setAdoptJob] = useState('')
@@ -2931,6 +3120,9 @@ function ShadersPage() {
   const hoverTimer = useRef(0)
   const lastOpened = useRef('')
   const shellRef = useRef(null)
+  const selectAllRef = useRef(null)
+  // The last tile checkbox clicked, where a shift-click range starts.
+  const anchorRef = useRef('')
 
   usePopover(filterOpen, setFilterOpen, filterPop, filterButton)
 
@@ -2975,10 +3167,38 @@ function ShadersPage() {
   const thumbs = useThumbs((page && page.pickUp ? [...rows, page.pickUp] : rows).map(rowThumbItem))
   const missingThumbs = rows.filter(row => !row.thumb && !row.thumbVersion).length
 
+  const qsRef = useRef(qs)
+  qsRef.current = qs
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
+
   useEffect(() => {
     setSelected(new Set())
+    setDeleting(false)
     setActiveIndex(0)
   }, [qs])
+
+  const clearSelection = () => {
+    setSelected(new Set())
+    setDeleting(false)
+  }
+
+  // Every shader of this tab and filter, also the ones not loaded yet.
+  const selectAll = async () => {
+    const asked = qs
+    let ids = rows.map(row => row.id)
+
+    try {
+      const answer = await apiCall(`/library/ids${asked ? `?${asked}` : ''}`)
+      ids = answer && Array.isArray(answer.ids) ? answer.ids : ids
+    } catch (error) {
+      say(`Selected the ${ids.length} shown; the full list did not load: ${problemText(error)}`, 'warn')
+    }
+
+    if (qsRef.current === asked) {
+      setSelected(new Set(ids))
+    }
+  }
 
   const onHover = useCallback(id => {
     window.clearTimeout(hoverTimer.current)
@@ -3019,11 +3239,18 @@ function ShadersPage() {
   openRef.current = openShader
   const onOpenTile = useCallback(id => openRef.current(id), [])
 
-  const toggleSelect = useCallback(id => {
+  const toggleSelect = useCallback((id, range) => {
+    const list = rowsRef.current.map(row => row.id)
+    const from = list.indexOf(anchorRef.current)
+    const to = list.indexOf(id)
+    anchorRef.current = id
+
     setSelected(current => {
       const next = new Set(current)
 
-      if (next.has(id)) {
+      if (range && from >= 0 && to >= 0) {
+        list.slice(Math.min(from, to), Math.max(from, to) + 1).forEach(item => next.add(item))
+      } else if (next.has(id)) {
         next.delete(id)
       } else {
         next.add(id)
@@ -3118,6 +3345,13 @@ function ShadersPage() {
   }
 
   const onGridKey = event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !event.target.closest('input, textarea, select, [contenteditable=true]')) {
+      event.preventDefault()
+      selectAll()
+
+      return
+    }
+
     const nodes = gridRef.current ? [...gridRef.current.querySelectorAll('[data-tile-id]')] : []
     const index = nodes.indexOf(document.activeElement)
 
@@ -3163,13 +3397,17 @@ function ShadersPage() {
       setImportOpen(false)
     } else if (openId) {
       closeSheet()
+    } else {
+      clearSelection()
     }
   }
 
   // Escape closes the sheet from anywhere in this page, also when focus fell back to the body
   // (a button that disabled itself); inner editors stop the event first.
+  const selecting = selected.size > 0
+
   useEffect(() => {
-    if (!openId && !importOpen) {
+    if (!openId && !importOpen && !selecting) {
       return undefined
     }
 
@@ -3186,16 +3424,27 @@ function ShadersPage() {
     document.addEventListener('keydown', onKey)
 
     return () => document.removeEventListener('keydown', onKey)
-  }, [openId, importOpen])
+  }, [openId, importOpen, selecting])
 
   const total = page ? page.total : 0
+  const allSelected = total > 0 && selected.size >= total
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selected.size > 0 && !allSelected
+    }
+  })
   const Item = view === 'list' ? ListRow : Tile
 
   const header = jsxs('header', {
     className: 'sb-phead',
     children: [
-      jsx('h1', { children: 'Shaders' }),
+      jsx('h1', { children: 'Shaderbrücke' }),
       page ? jsx('span', { className: 'sb-count', children: `${total} ${total === 1 ? 'shader' : 'shaders'}${archived ? ' archived' : ''}` }) : null,
+      page && rows.length && !labId
+        ? jsx('input', { type: 'checkbox', ref: selectAllRef, className: 'sb-selall', 'data-action': 'select-all', checked: allSelected, 'aria-label': selected.size ? 'Clear the selection' : 'Select all shaders',
+            title: selected.size ? 'Clear the selection (Escape)' : 'Select all shaders', onChange: () => (selected.size ? clearSelection() : selectAll()) })
+        : null,
       jsx('span', { className: 'sb-grow' }),
       jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'import', onClick: () => setImportOpen(true), children: [icon('cloud-download'), 'Import'] }),
       jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'new-shader', onClick: () => newShader(), children: [icon('add'), 'New shader'] })
@@ -3335,19 +3584,19 @@ function ShadersPage() {
   }
 
   const bulk = selected.size
-    ? jsx('div', {
+    ? jsxs('div', {
         className: 'sb-bulk',
-        children: jsxs('div', {
+        children: [deleting ? jsx(BulkDeleteForm, { client, ids: [...selected], rowById, onCancel: () => setDeleting(false), onDone: clearSelection }, 'delete') : null, jsxs('div', {
           className: 'sb-bulkbar',
           role: 'toolbar',
           'aria-label': 'Selected shaders',
           children: [
-            jsx('span', { className: 'sb-count', 'data-bulk-count': selected.size, children: `${selected.size} selected` }),
+            jsx('span', { className: 'sb-count', 'data-bulk-count': selected.size, children: allSelected && total > 1 ? `All ${selected.size} selected` : `${selected.size} selected` }),
             jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'bulk-archive', disabled: bulkBusy, onClick: bulkArchive, children: [icon(archived ? 'discard' : 'archive'), archived ? 'Restore' : 'Archive'] }),
             jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'bulk-share', onClick: () => saveShareFiles([...selected].map(id => ({ id }))), children: [icon('save'), 'Share files'] }),
-            jsx('button', { type: 'button', className: 'sb-btn sb-ghost', onClick: () => setSelected(new Set()), children: 'Clear' })
+            jsx('button', { type: 'button', className: 'sb-btn sb-danger-btn', 'data-action': 'bulk-delete', 'aria-expanded': deleting ? 'true' : 'false', disabled: bulkBusy, onClick: () => setDeleting(open => !open), children: [icon('trash'), 'Delete'] })
           ]
-        })
+        }, 'bar')]
       })
     : null
 
@@ -3588,39 +3837,22 @@ function SheetExport({ id, version, name }) {
   const client = sdk.useQueryClient()
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState('')
-  const buttonRef = useRef(null)
-  const menuRef = useRef(null)
+  const refocusRef = useRef(true)
   const menuId = `sb-sheet-export-menu-${useId()}`
   const versionQuery = version ? `?version=${encodeURIComponent(version)}` : ''
   const targetsQuery = sdk.useQuery({ queryKey: qkey('targets', id, version || 0), queryFn: () => apiCall(`${shaderPath(id)}/targets${versionQuery}`), enabled: open })
   const targets = targetsQuery.data && Array.isArray(targetsQuery.data.targets) ? targetsQuery.data.targets : []
   const title = displayName(name)
 
-  useEffect(() => {
-    if (!open) {
-      return undefined
-    }
-
-    const onDown = event => {
-      if (menuRef.current && !menuRef.current.contains(event.target) && !(buttonRef.current && buttonRef.current.contains(event.target))) {
-        setOpen(false)
-      }
-    }
-
-    document.addEventListener('mousedown', onDown)
-
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
   const close = refocus => {
+    refocusRef.current = refocus
     setOpen(false)
-    refocus && buttonRef.current && buttonRef.current.focus()
   }
 
-  const askHermes = row => {
+  const askToFixExport = (row, problem) => {
     close(false)
 
-    return draftInNewChat(`Export the shader "${title}" (id ${id}${version ? `, v${version}` : ''}) as ${targetName(row, true)} with shader_export, and prove it.`, `Export: ${title}`)
+    return draftInNewChat(exportFixRequest(title, id, version, row, problem), `Export: ${title}`)
       .then(result => say(result.ok ? 'The export request is drafted in a new chat.' : 'Could not open a chat, so the request is on the clipboard.', result.ok ? 'ok' : 'warn'))
   }
 
@@ -3635,12 +3867,12 @@ function SheetExport({ id, version, name }) {
       const verdict = answer && answer.proof ? answer.proof.verdict : 'not_proven'
 
       if (answer && answer.success === false) {
-        say(`${label} export failed: ${answer.error || 'no reason given'}.`, 'err', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+        say(`${label} export failed: ${answer.error || 'no reason given'}.`, 'err', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `failed: ${answer.error || 'no reason given'}`) }])
       } else {
         say(verdict === 'match' ? `${label} exported and proven: match.` : `${label} exported, ${verdict === 'differs' ? 'but the proof differs' : 'not proven'}.`, verdict === 'match' ? 'ok' : 'warn')
       }
     } catch (error) {
-      say(`${label} export failed: ${problemText(error)}`, 'err', [{ label: 'Ask Hermes', run: () => askHermes(row) }])
+      say(`${label} export failed: ${problemText(error)}`, 'err', [{ label: 'Ask Hermes to fix it', run: () => askToFixExport(row, `failed: ${problemText(error)}`) }])
     } finally {
       setBusy('')
     }
@@ -3682,26 +3914,21 @@ function SheetExport({ id, version, name }) {
     }
   }
 
-  return jsxs('span', {
-    className: 'sb-menu-anchor',
-    children: [
-      jsx('button', {
-        type: 'button',
-        ref: buttonRef,
-        className: 'sb-btn',
-        'aria-haspopup': 'true',
-        'aria-expanded': open ? 'true' : 'false',
-        'aria-controls': menuId,
-        'data-action': 'export',
-        onClick: () => setOpen(value => !value),
-        children: [icon('export'), 'Export', icon('chevron-down')]
-      }),
-      open
-        ? targets.length
-          ? jsx(ExportMenu, { id: menuId, targets, busy, menuRef, onCopy: copyFile, onSend: sendToChat, onExport: exportNow, onAsk: askHermes, onClose: close })
-          : jsx('div', { ref: menuRef, className: 'sb-menu', role: 'status', children: targetsQuery.isError ? `Targets did not load: ${problemText(targetsQuery.error)}` : 'Loading targets' })
-        : null
-    ]
+  return jsx(ExportPopover, {
+    id: menuId,
+    open,
+    onOpenChange: setOpen,
+    refocusRef,
+    trigger: jsx('button', {
+      type: 'button',
+      className: 'sb-btn',
+      'aria-controls': menuId,
+      'data-action': 'export',
+      children: [icon('export'), 'Export', icon('chevron-down')]
+    }),
+    children: targets.length
+      ? jsx(ExportMenu, { targets, busy, onCopy: copyFile, onSend: sendToChat, onExport: exportNow })
+      : jsx('div', { className: 'sb-mstatus', role: 'status', children: targetsQuery.isError ? `Targets did not load: ${problemText(targetsQuery.error)}` : 'Loading targets' })
   })
 }
 
@@ -4008,10 +4235,11 @@ function DeleteForm({ client, row, onDeleted, onCancel }) {
     onSubmit: submit,
     children: [
       jsx('b', { children: 'Delete forever' }),
-      jsx('p', { children: `Every version, frame and preview of ${displayName(row.name)} is removed from the library. Type its name to confirm.` }),
+      jsx('p', { children: `Every version, frame and preview of ${displayName(row.name)} is removed from the library; copies already exported into a project folder stay. Type its name to confirm.` }),
       jsx('input', {
         className: 'sb-field',
         value: text,
+        autoFocus: true,
         'aria-label': `Type ${row.name} to confirm`,
         placeholder: row.name,
         onChange: event => setText(event.target.value),
@@ -4026,6 +4254,80 @@ function DeleteForm({ client, row, onDeleted, onCancel }) {
         className: 'sb-pick-actions',
         children: [
           jsx('button', { type: 'submit', className: 'sb-btn sb-danger-btn', disabled: !matches || busy, 'data-action': 'delete-confirm', children: [icon('trash'), 'Delete forever'] }),
+          jsx('button', { type: 'button', className: 'sb-btn sb-ghost', onClick: onCancel, children: 'Cancel' })
+        ]
+      }),
+      error ? jsx('p', { className: 'sb-inline-err', role: 'alert', children: error }) : null
+    ]
+  })
+}
+
+const BULK_NAMES = 3
+
+/** The selection bar's Delete: one POST /library/delete after `delete` is typed. */
+function BulkDeleteForm({ client, ids, rowById, onDone, onCancel }) {
+  const [text, setText] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const matches = text.trim() === 'delete'
+  const names = ids.map(id => rowById.get(id)).filter(Boolean).slice(0, BULK_NAMES).map(row => displayName(row.name))
+  const more = ids.length - names.length
+  const count = `${ids.length} ${ids.length === 1 ? 'shader' : 'shaders'}`
+
+  const submit = async event => {
+    event.preventDefault()
+
+    if (!matches || busy) {
+      return
+    }
+
+    setBusy(true)
+
+    try {
+      const answer = await apiCall('/library/delete', { method: 'POST', body: { ids, confirm: 'delete' } })
+      const deleted = (answer && answer.deleted) || []
+      const missing = (answer && answer.missing) || []
+
+      for (const id of deleted) {
+        storeRemove(labKey(id))
+        client.removeQueries({ queryKey: qkey('detail', id) })
+      }
+
+      say(`Deleted ${deleted.length} ${deleted.length === 1 ? 'shader' : 'shaders'}.${missing.length ? ` ${missing.length} ${missing.length === 1 ? 'was' : 'were'} already gone.` : ''}`, 'ok')
+      invalidateShader(client)
+      onDone()
+    } catch (failure) {
+      setError(problemText(failure))
+      setBusy(false)
+    }
+  }
+
+  return jsxs('form', {
+    className: 'sb-danger sb-bulkdel',
+    'data-form': 'bulk-delete',
+    onSubmit: submit,
+    children: [
+      jsx('b', { children: `Delete ${count} forever` }),
+      jsx('p', { children: `${names.join(', ')}${more > 0 ? `${names.length ? ' and ' : ''}${more} more` : ''}. Every version, frame and preview is removed from the library; copies already exported into a project folder stay. Type delete to confirm.` }),
+      jsx('input', {
+        className: 'sb-field',
+        value: text,
+        autoFocus: true,
+        'aria-label': 'Type delete to confirm',
+        placeholder: 'delete',
+        onChange: event => setText(event.target.value),
+        onKeyDown: event => {
+          if (event.key === 'Escape') {
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
+            onCancel()
+          }
+        }
+      }),
+      jsxs('div', {
+        className: 'sb-pick-actions',
+        children: [
+          jsx('button', { type: 'submit', className: 'sb-btn sb-danger-btn', disabled: !matches || busy, 'data-action': 'bulk-delete-confirm', children: [icon('trash'), `Delete ${count}`] }),
           jsx('button', { type: 'button', className: 'sb-btn sb-ghost', onClick: onCancel, children: 'Cancel' })
         ]
       }),
@@ -4051,7 +4353,7 @@ function Filmstrip({ detail, current, ticks, onOpen, onTick }) {
     className: 'sb-sec',
     'aria-label': 'Versions',
     children: [
-      jsxs('h3', { children: [`Versions (${versions.length})`, jsx('span', { className: 'sb-count', style: { fontWeight: 400 }, children: versions.length > 1 ? 'Tick two to compare' : '' })] }),
+      jsxs('h3', { children: [`Versions (${versions.length})`, jsx('span', { className: 'sb-count', style: { fontWeight: 400, marginLeft: 8 }, children: versions.length > 1 ? 'Tick two to compare' : '' })] }),
       jsx('ol', {
         className: 'sb-film',
         children: versions.map(version => {
@@ -4340,16 +4642,26 @@ function ShaderSheet({ id, query, archived, onClose, onOpenShader }) {
         children: [
           jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'edit-lab', 'aria-expanded': mode === 'lab' ? 'true' : 'false', onClick: () => setMode(mode === 'lab' ? '' : 'lab'), children: [icon('beaker'), 'Edit in Lab'] }),
           jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'share', onClick: () => saveShareFiles([{ id, version: doc.version }]), children: [icon('save'), 'Share file'] }),
-          jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'rename', 'aria-expanded': mode === 'rename' ? 'true' : 'false', onClick: () => setMode(mode === 'rename' ? '' : 'rename'), children: [icon('edit'), 'Rename'] }),
           jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': row.archived ? 'unarchive' : 'archive', disabled: Boolean(pending), onClick: () => archive(false), children: [icon(row.archived ? 'discard' : 'archive'), row.archived ? 'Unarchive' : 'Archive'] }),
-          row.archived
-            ? jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'delete', 'aria-expanded': mode === 'delete' ? 'true' : 'false', onClick: () => setMode(mode === 'delete' ? '' : 'delete'), children: [icon('trash'), 'Delete'] })
-            : null
+          jsxs(sdk.DropdownMenu, {
+            children: [
+              jsx(sdk.DropdownMenuTrigger, { asChild: true, children: jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'aria-label': 'More actions', 'data-action': 'more', children: icon('ellipsis') }) }),
+              jsxs(sdk.DropdownMenuContent, {
+                align: 'end',
+                // The picked form takes the focus, not the trigger.
+                onCloseAutoFocus: event => event.preventDefault(),
+                children: [
+                  jsx(sdk.DropdownMenuItem, { 'data-action': 'rename', onSelect: () => setMode('rename'), children: [icon('edit'), 'Rename'] }),
+                  jsx(sdk.DropdownMenuItem, { 'data-action': 'delete', variant: 'destructive', onSelect: () => setMode('delete'), children: [icon('trash'), 'Delete\u2026'] })
+                ]
+              })
+            ]
+          })
         ]
       }, 'actions2'),
       mode === 'lab' ? jsx(LabChooser, { row }, 'lab') : null,
       mode === 'rename' ? jsx(RenameForm, { client, row, onDone: () => setMode('') }, 'rename') : null,
-      mode === 'delete' && row.archived ? jsx(DeleteForm, { client, row, onCancel: () => setMode(''), onDeleted: onClose }, 'delete') : null,
+      mode === 'delete' ? jsx(DeleteForm, { client, row, onCancel: () => setMode(''), onDeleted: onClose }, 'delete') : null,
       jsxs('dl', {
         className: 'sb-kv',
         children: [
@@ -4870,6 +5182,12 @@ function LabRoot({ id, onBack }) {
 const LAB_UNCHECKED_GATE = { level: 'unchecked', word: 'Not checked yet', tone: 'warn', glyph: 'shield',
   text: 'Edits pass the flash check when you save, so this preview waits for your click.' }
 
+/** The same gate on a shader whose saved version plays by itself: its Play click is stored (`labPlay`). */
+const LAB_FIRST_PLAY_GATE = { ...LAB_UNCHECKED_GATE, remember: true,
+  text: 'Edits are flash-checked only when you save. Play starts them live, in this Lab and every later one.' }
+
+const SAVE_KEYS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '') ? '\u2318S' : 'Ctrl+S'
+
 function LabEditor({ id, onBack }) {
   const client = sdk.useQueryClient()
   const detailQuery = useShaderDetail(id)
@@ -4882,6 +5200,8 @@ function LabEditor({ id, onBack }) {
   const [compiled, setCompiled] = useState({ text: '', sliders: [] })
   // Play consent for this Lab: asked once for unchecked text, then kept across recompiles.
   const [consent, setConsent] = useState(false)
+  // The version a save answered, standing in for `latest` until the detail refetch carries it.
+  const [answered, setAnswered] = useState(null)
   const [lint, setLint] = useState([])
   const [gpu, setGpu] = useState([])
   const [server, setServer] = useState({ markers: [], message: '' })
@@ -4977,12 +5297,21 @@ function LabEditor({ id, onBack }) {
       const answer = await apiCall(`${shaderPath(id)}/versions`, { method: 'POST', body: { source: draft.text, base_version: draft.base }, timeoutMs: LONG_MS })
 
       if (answer && answer.ok) {
+        const held = playGate(answer.version)
         savedRef.current = { text: draft.text, base: answer.version.version }
         storeRemove(labKey(id))
+        setAnswered(answer.version)
         setDraft({ text: draft.text, base: answer.version.version, restored: false })
         setServer({ markers: [], message: '' })
+
+        if (held) {
+          setConsent(false)
+        }
+
         invalidateShader(client, id)
-        say(`Saved as v${answer.version.version}. Hermes sees it in your next message.`, 'ok', null, scope)
+        say(held
+          ? `Saved as v${answer.version.version}. ${held.text} Hermes sees it in your next message.`
+          : `Saved as v${answer.version.version}. Hermes sees it in your next message.`, held ? 'warn' : 'ok', null, scope)
       } else {
         const markers = ((answer && answer.diagnostics) || []).map(d => ({ line: d.line, severity: d.severity === 'warning' ? 'warn' : 'error', message: d.message, source: 'server' }))
         setServer({ markers, message: (answer && answer.message) || 'The server check refused this version.' })
@@ -4994,6 +5323,9 @@ function LabEditor({ id, onBack }) {
         setStale({ latest: Number(problem.detail.latest) || null })
       } else if (problem.code === 'busy') {
         say('The renderer is busy with other renders. Try again in a moment.', 'warn', null, scope)
+      } else if (problem.code === 'not_found') {
+        storeRemove(labKey(id))
+        say(`Not saved: ${problem.message || 'This shader was deleted.'}`, 'err', null, scope)
       } else {
         say(`Not saved: ${problemText(error)}`, 'err', null, scope)
       }
@@ -5055,11 +5387,21 @@ function LabEditor({ id, onBack }) {
   const name = displayName(detail.row.name)
   const status = errors.length ? `${errors.length} ${errors.length === 1 ? 'problem' : 'problems'}` : dirty ? 'Unsaved changes' : 'Saved'
   const previewDoc = { id, version: draft.base, source: compiled.text, sliders: compiled.sliders, thumb: latest.thumb }
-  // The saved text plays by the server's verdict; any other text is unchecked (a flash block
-  // on the saved version keeps its stronger gate).
-  const savedGate = playGate(latest)
-  const previewGate = savedRef.current && compiled.text === savedRef.current.text ? savedGate
-    : savedGate && savedGate.level === 'block' ? savedGate : LAB_UNCHECKED_GATE
+  // The saved text plays by the server's verdict. Other text is unchecked: on a shader whose saved
+  // version plays by itself one stored Play click lets it run; any other verdict keeps a gate in
+  // every Lab, block its stronger one, because Stage arms with `consent || !gate`.
+  const savedVersion = answered && answered.version > latest.version ? answered : latest
+  const savedGate = playGate(savedVersion)
+  const labPlay = storeGet('labPlay', false) === true
+  const editGate = savedGate ? (savedGate.level === 'block' ? savedGate : LAB_UNCHECKED_GATE) : labPlay ? null : LAB_FIRST_PLAY_GATE
+  const previewGate = savedRef.current && compiled.text === savedRef.current.text ? savedGate : editGate
+  const onConsent = () => {
+    if (previewGate && previewGate.remember) {
+      storeSet('labPlay', true)
+    }
+
+    setConsent(true)
+  }
 
   return jsxs('div', {
     className: 'sb-lab-frame',
@@ -5067,7 +5409,7 @@ function LabEditor({ id, onBack }) {
       jsxs('header', {
         className: 'sb-lab-head',
         children: [
-          onBack ? jsx('button', { type: 'button', className: 'sb-icon-btn', 'aria-label': 'Back to Shaders', onClick: onBack, children: icon('arrow-left') }) : null,
+          onBack ? jsx('button', { type: 'button', className: 'sb-icon-btn', 'aria-label': 'Back to Shaderbrücke', onClick: onBack, children: icon('arrow-left') }) : null,
           icon('beaker'),
           jsx('b', { className: 'sb-lab-name', children: name }),
           jsx('span', { className: 'sb-ver', children: `based on v${draft.base}` }),
@@ -5077,8 +5419,8 @@ function LabEditor({ id, onBack }) {
             ? jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'lab-discard', disabled: saving, onClick: discard, children: [icon('discard'), 'Discard edits'] })
             : null,
           jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'aria-pressed': learnOpen ? 'true' : 'false', 'data-action': 'learn', onClick: () => setLearnOpen(v => !v), children: [icon('lightbulb'), 'Learn'] }),
-          jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'lab-save', disabled: saving || !dirty, onClick: save,
-            children: saving ? [icon('loading', 'codicon-modifier-spin'), 'Checking'] : [icon('save'), 'Save version'] })
+          jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'lab-save', disabled: saving || !dirty, onClick: save, title: `Save version (${SAVE_KEYS})`,
+            children: saving ? [icon('loading', 'codicon-modifier-spin'), 'Checking'] : [icon('save'), 'Save version', jsx('span', { className: 'sb-kbd', 'aria-hidden': 'true', children: SAVE_KEYS })] })
         ]
       }),
       draft.restored
@@ -5135,7 +5477,7 @@ function LabEditor({ id, onBack }) {
             'aria-label': 'Preview',
             children: [
               compiled.text
-                ? jsx(Stage, { doc: previewDoc, label: `${name}, Lab preview`, values, controlRef, onPhaseChange: onPhase, gate: previewGate, consent, onConsent: () => setConsent(true) }, 'preview')
+                ? jsx(Stage, { doc: previewDoc, label: `${name}, Lab preview`, values, controlRef, onPhaseChange: onPhase, gate: previewGate, consent, onConsent }, 'preview')
                 : jsx('div', { className: 'sb-pstage sb-skel-stage' }),
               compiled.sliders.length
                 ? jsxs('section', {
@@ -5284,7 +5626,9 @@ button.sb-pchip{border:0;cursor:pointer;font-family:inherit}
 .sb-banner-actions{display:flex;gap:6px;margin-left:auto;flex:none;align-self:center}
 .sb-jobline{color:var(--ui-text-secondary);font-variant-numeric:tabular-nums}
 .sb-more{display:flex;justify-content:center;margin-top:22px}
-.sb-bulk{position:sticky;bottom:12px;z-index:10;display:flex;justify-content:center;margin-top:16px;pointer-events:none}
+.sb-bulk{position:sticky;bottom:12px;z-index:10;display:flex;flex-direction:column;align-items:center;gap:8px;margin-top:16px;pointer-events:none}
+.sb-bulkdel{pointer-events:auto;width:min(520px,100%);background-color:var(--ui-bg-elevated);box-shadow:0 8px 24px rgb(0 0 0/.2)}
+.sb-selall{align-self:center;margin:0;width:15px;height:15px;accent-color:var(--ui-accent);cursor:pointer}
 .sb-bulkbar{pointer-events:auto;display:flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;border-radius:10px;background:var(--ui-bg-elevated);border:1px solid var(--ui-stroke-secondary);box-shadow:0 8px 24px rgb(0 0 0/.2)}
 .sb-empty{display:grid;justify-items:center;text-align:center;padding:56px 20px}
 .sb-empty>.codicon{font-size:28px;color:var(--ui-text-secondary)}
@@ -5308,8 +5652,6 @@ button.sb-pchip{border:0;cursor:pointer;font-family:inherit}
 .sb-problem-flat{margin:8px 0}
 .sb-sactions{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .sb-sactions2{display:flex;flex-wrap:wrap;gap:2px;margin:0 -8px 12px}
-.sb-menu-anchor{position:relative;display:inline-flex}
-.sb-menu-anchor .sb-menu{top:34px;bottom:auto;left:0;color:var(--ui-text-primary);font-size:12.5px}
 .sb-toaster{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:40;pointer-events:none}
 .sb-toast-box{pointer-events:auto;display:flex;align-items:center;gap:8px;width:max-content;max-width:min(640px,calc(100vw - 64px));padding:6px 6px 6px 12px;border-radius:10px;background:var(--ui-bg-elevated);border:1px solid var(--ui-stroke-secondary);box-shadow:0 8px 24px rgb(0 0 0/.22);font-size:12.5px}
 .sb-toast-box .sb-btn{height:24px;padding:0 8px;font-size:12px}
@@ -5392,6 +5734,7 @@ const LAB_CSS = `
 .sb-lab-frame{height:100%;display:flex;flex-direction:column;min-height:0}
 .sb-lab-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--ui-stroke-tertiary);min-width:0}
 .sb-lab-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.sb-kbd{margin-left:2px;font-size:11px;font-weight:400;letter-spacing:.02em}
 .sb-lab-status{font-size:12px;color:var(--ui-text-secondary);white-space:nowrap}
 .sb-lab-note{margin:6px 12px 0;font-size:12px;color:var(--ui-text-secondary)}
 .sb-lab-banner{margin:8px 12px 0}
@@ -5444,8 +5787,8 @@ export default {
         id: 'shader-canvas',
         area: sdk.TOOL_MEDIA_RENDERER_AREA,
         data: {
-          tools: ['shader_render'],
-          render: props => jsx(ShaderCanvas, props)
+          tools: ['shader_render', 'shader_library'],
+          render: props => (drawsCard(props.toolName, props.args) ? jsx(ShaderCanvas, props) : props.fallback)
         }
       })
     }
@@ -5455,14 +5798,14 @@ export default {
       return
     }
 
-    ctx.register({ id: 'page', area: sdk.ROUTES_AREA, title: 'Shaders', data: { path: PAGE_PATH }, render: () => jsx(ShadersPage, {}) })
+    ctx.register({ id: 'page', area: sdk.ROUTES_AREA, title: 'Shaderbrücke', data: { path: PAGE_PATH }, render: () => jsx(ShadersPage, {}) })
 
     if (typeof sdk.SIDEBAR_NAV_AREA === 'string') {
-      ctx.register({ id: 'nav', area: sdk.SIDEBAR_NAV_AREA, data: { codicon: 'symbol-color', label: 'Shaders', path: PAGE_PATH } })
+      ctx.register({ id: 'nav', area: sdk.SIDEBAR_NAV_AREA, data: { codicon: 'symbol-color', label: 'Shaderbrücke', path: PAGE_PATH } })
     }
 
     if (typeof sdk.PALETTE_AREA === 'string') {
-      ctx.register({ id: 'open', area: sdk.PALETTE_AREA, data: { id: 'shaderbruecke.open', label: 'Open Shaders', keywords: ['shader', 'library', 'gallery', 'glsl'], run: () => goPage({}) } })
+      ctx.register({ id: 'open', area: sdk.PALETTE_AREA, data: { id: 'shaderbruecke.open', label: 'Open Shaderbrücke', keywords: ['shader', 'shaderbruecke', 'library', 'gallery', 'glsl'], run: () => goPage({}) } })
       ctx.register({ id: 'new', area: sdk.PALETTE_AREA, data: { id: 'shaderbruecke.new', label: 'New shader', keywords: ['shader', 'create', 'glsl'], run: () => newShader() } })
     }
   }

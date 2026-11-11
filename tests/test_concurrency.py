@@ -124,6 +124,46 @@ def test_a_lab_save_whose_base_moved_during_its_render_is_stale(lib, monkeypatch
     assert stored[1][1]["author_kind"] == "agent"
 
 
+class DeletingBrowser(FakeBrowser):
+    """A render during which the user deletes the shader in Desktop."""
+
+    def __init__(self, db, base, shader_id):
+        super().__init__(1)
+        self.db, self.base, self.shader_id = db, base, shader_id
+
+    def __call__(self, source, out_dir, **kwargs):
+        answer = super().__call__(source, out_dir, **kwargs)
+        conn = sqlite3.connect(self.db)
+        record.add_human_notice(conn, self.shader_id, 1)
+        record.delete(conn, self.base, self.shader_id)
+        conn.close()
+        return answer
+
+
+def test_an_agent_render_of_a_shader_deleted_meanwhile_stores_nothing(lib, monkeypatch):
+    db, base, shader_id = lib
+    monkeypatch.setattr(PLUGIN.renderer, "render_bundle", DeletingBrowser(db, base, shader_id))
+    answer = json.loads(PLUGIN._render(sqlite3.connect(db), base, source=SOURCE + "// agent\n", name="sky",
+                                       requested_id=shader_id, keep_iterating=True))
+    assert answer["success"] is False and answer["status"] == "not_found", answer
+    assert versions(db, shader_id) == []
+    assert not record.shader_dir(base, shader_id).exists()
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM human_notices").fetchone()[0] == 0
+    conn.close()
+
+
+def test_a_lab_save_of_a_shader_deleted_meanwhile_says_so(lib, monkeypatch):
+    db, base, shader_id = lib
+    monkeypatch.setattr(PLUGIN.renderer, "render_bundle", DeletingBrowser(db, base, shader_id))
+    monkeypatch.setattr(PLUGIN.renderer, "free_slots", lambda directory: 2)
+    answer = PLUGIN.save_human_version(sqlite3.connect(db), base, shader_id, SOURCE + "// human\n", 1)
+    assert answer == {"refused": 404, "error": "not_found", "message": "This shader was deleted."}
+    assert versions(db, shader_id) == []
+    again = PLUGIN.save_human_version(sqlite3.connect(db), base, shader_id, SOURCE + "// human\n", 1)
+    assert again["refused"] == 404 and again["message"] == "This shader was deleted."
+
+
 def test_an_attempt_still_rendering_survives_another_attempts_success(lib, monkeypatch):
     db, base, shader_id = lib
     monkeypatch.setattr(PLUGIN.renderer, "render_bundle", FakeBrowser(2))

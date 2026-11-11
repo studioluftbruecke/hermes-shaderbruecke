@@ -48,7 +48,7 @@ def test_the_id_of_a_failed_first_render_continues_as_version_1(render):
     fixed = render(source=GOOD, name="broken", id=failed["id"])
     assert fixed["success"] is True, fixed
     assert fixed["id"] == failed["id"] and fixed["version"] == 1, fixed
-    again = render(source=GOOD, name="broken", id=failed["id"])
+    again = render(source=GOOD + "// v2\n", name="broken", id=failed["id"])
     assert again["version"] == 2, again
 
 

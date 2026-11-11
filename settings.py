@@ -11,7 +11,7 @@ from __future__ import annotations
 PLUGIN = "shaderbruecke"
 
 DEFAULTS = {"allow_project_writes": False, "credit_line": True, "keep_versions": 5,
-            "author_name": "", "author_url": ""}
+            "author_name": "", "author_url": "", "starter_prompt": True}
 TEXT_LIMIT = 120
 KEEP_VERSIONS_RANGE = (1, 100)
 
@@ -59,6 +59,7 @@ def normalise(raw: dict | None) -> dict:
         "keep_versions": _int(raw.get("keep_versions"), DEFAULTS["keep_versions"]),
         "author_name": _text(raw.get("author_name")),
         "author_url": _url(raw.get("author_url")),
+        "starter_prompt": _bool(raw.get("starter_prompt"), DEFAULTS["starter_prompt"]),
     }
 
 
@@ -84,5 +85,5 @@ def _raw_settings() -> dict:
 
 def read_settings() -> dict:
     """``{"allow_project_writes": bool, "credit_line": bool, "keep_versions": int, "author_name": str,
-    "author_url": str}``."""
+    "author_url": str, "starter_prompt": bool}``."""
     return normalise(_raw_settings())

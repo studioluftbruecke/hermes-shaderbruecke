@@ -42,8 +42,8 @@ def test_the_third_version_in_a_row_tells_the_agent_to_stop(tmp_path, monkeypatc
     base = tmp_path / "data"
     monkeypatch.setattr(PLUGIN, "_storage", lambda: (sqlite3.connect(db), base))
     first = json.loads(PLUGIN.shader_render({"source": GOOD, "name": "sky"}))
-    second = json.loads(PLUGIN.shader_render({"source": GOOD, "name": "sky", "id": first["id"]}))
-    third = json.loads(PLUGIN.shader_render({"source": GOOD, "name": "sky", "id": first["id"]}))
+    second = json.loads(PLUGIN.shader_render({"source": GOOD + "// v2\n", "name": "sky", "id": first["id"]}))
+    third = json.loads(PLUGIN.shader_render({"source": GOOD + "// v3\n", "name": "sky", "id": first["id"]}))
     assert "Stop here" not in first["next"] and "Stop here" not in second["next"], (first["next"], second["next"])
     assert third["version"] == 3 and "Stop here" in third["next"], third["next"]
     assert third["versions_last_15_min"] == 3
@@ -78,8 +78,8 @@ def test_keep_iterating_lets_the_user_ask_for_more(tmp_path, monkeypatch):
     base = tmp_path / "data"
     monkeypatch.setattr(PLUGIN, "_storage", lambda: (sqlite3.connect(db), base))
     first = json.loads(PLUGIN.shader_render({"source": GOOD, "name": "sky"}))
-    for _ in range(2):
-        PLUGIN.shader_render({"source": GOOD, "name": "sky", "id": first["id"]})
-    fourth = json.loads(PLUGIN.shader_render({"source": GOOD, "name": "sky", "id": first["id"],
+    for version in (2, 3):
+        PLUGIN.shader_render({"source": GOOD + f"// v{version}\n", "name": "sky", "id": first["id"]})
+    fourth = json.loads(PLUGIN.shader_render({"source": GOOD + "// v4\n", "name": "sky", "id": first["id"],
                                               "keep_iterating": True}))
     assert fourth["success"] is True and fourth["version"] == 4, fourth

@@ -138,32 +138,42 @@ def export_now(conn: sqlite3.Connection, base: Path, shader_id: str, target: str
                                       settings=_settings())
 
 
-def set_values(conn: sqlite3.Connection, shader_id: str, values: dict) -> dict:
-    """Store the human's slider values (tuned values); exports use them from now on."""
+def set_values(conn: sqlite3.Connection, shader_id: str, values: dict, version: int | None = None) -> dict:
+    """Store the human's slider values (tuned values) on one version, default the latest; exports
+    of that version use them from now on."""
     bad = _bad_id(shader_id)
     if bad:
         return bad
-    document = record.set_slider_values(conn, shader_id, values)
+    document = record.set_slider_values(conn, shader_id, values, version)
     if document is None:
-        return {"error": f"no shader {shader_id}", "status": 404}
+        return _no_version(shader_id, version)
     return {"id": shader_id, "version": document["version"], "tuned_values": _tuned(document)}
 
 
-def reset_values(conn: sqlite3.Connection, shader_id: str) -> dict:
-    """Back to the authored defaults: the tuned values are dropped, exports use the defaults."""
+def reset_values(conn: sqlite3.Connection, shader_id: str, version: int | None = None) -> dict:
+    """Back to the authored defaults on one version, default the latest: the tuned values are
+    dropped, exports use the defaults."""
     bad = _bad_id(shader_id)
     if bad:
         return bad
-    document = record.reset_tuned_values(conn, shader_id)
+    document = record.reset_tuned_values(conn, shader_id, version)
     if document is None:
-        return {"error": f"no shader {shader_id}", "status": 404}
+        return _no_version(shader_id, version)
     return {"id": shader_id, "version": document["version"], "tuned_values": _tuned(document)}
 
 
-def refresh_thumb(conn: sqlite3.Connection, base: Path, conn_factory, shader_id: str) -> dict:
-    """After a slider change: the latest version's thumb is re-rendered with the new values as a
-    job (constraint 10). The slider request returns at once."""
-    if _bad_id(shader_id) or record.latest(conn, shader_id) is None:
+def _no_version(shader_id: str, version: int | None) -> dict:
+    return {"error": f"no shader {shader_id}" + (f" version {version}" if version is not None else ""),
+            "status": 404}
+
+
+def refresh_thumb(conn: sqlite3.Connection, base: Path, conn_factory, shader_id: str,
+                  version: int | None = None) -> dict:
+    """After a slider change on the latest version (or no version named): its thumb is re-rendered
+    with the new values as a job (constraint 10). The slider request returns at once. The library
+    shows the latest version's thumb, so tuning an older version refreshes nothing."""
+    newest = None if _bad_id(shader_id) else record.latest(conn, shader_id)
+    if newest is None or (version is not None and int(version) != int(newest["version"])):
         return {}
     return thumbs.start_refresh(conn, base, conn_factory, shader_id)
 
@@ -429,20 +439,62 @@ def set_archived(conn: sqlite3.Connection, base: Path, shader_id: str, archived:
 
 
 def delete_shader(conn: sqlite3.Connection, base: Path, shader_id: str, confirm) -> dict:
-    """D17: delete forever, only from the archive and only with the name typed."""
+    """Delete forever, archived or not, with the name typed. The agent has no delete (D17)."""
     bad = _check_id(shader_id)
     if bad:
         return bad
     if record.latest(conn, shader_id) is None:
         return _refuse(404, "not_found", f"no shader {shader_id}")
     meta = record.get_meta(conn, shader_id)
-    if not meta.get("archived_at"):
-        return _refuse(409, "not_archived", "archive the shader first; only archived shaders can be deleted")
     names = {meta["name"], record.display_name(meta["name"])}
     if not isinstance(confirm, str) or confirm.strip() not in names:
         return _refuse(400, "confirm_mismatch", "type the shader's name exactly to delete it")
     record.delete(conn, base, shader_id)
     return {"deleted": shader_id}
+
+
+MAX_BULK_IDS = 5000
+BULK_CONFIRM = "delete"
+
+
+def delete_many(conn: sqlite3.Connection, base: Path, body) -> dict:
+    """`POST /library/delete`: the selection bar's delete. Checks everything before it deletes
+    anything; an id that is already gone is `missing`, so a repeat ends in the same state."""
+    body = body if isinstance(body, dict) else {}
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > MAX_BULK_IDS \
+            or not all(isinstance(shader_id, str) for shader_id in ids):
+        return _refuse(400, "bad_request", f"ids must be a list of 1 to {MAX_BULK_IDS} shader ids")
+    for shader_id in ids:
+        bad = _check_id(shader_id)
+        if bad:
+            return bad
+    if body.get("confirm") != BULK_CONFIRM:
+        return _refuse(400, "confirm_mismatch", f"type {BULK_CONFIRM} to delete the selected shaders")
+    deleted, missing = [], []
+    for shader_id in dict.fromkeys(ids):
+        if record.latest(conn, shader_id) is None:
+            missing.append(shader_id)
+            continue
+        record.delete(conn, base, shader_id)
+        deleted.append(shader_id)
+    return {"deleted": deleted, "missing": missing}
+
+
+def library_ids(conn: sqlite3.Connection, params: dict) -> dict:
+    """`GET /library/ids`: every id the same `/library` query pages through, in its order, for
+    Select all across pages that were never loaded."""
+    library = _library()
+    query = {**library.parse_query(params), "offset": 0}
+    snapshot = _snapshot(conn)
+    rows_all = [_row_lite(conn, snapshot, shader_id) for shader_id in snapshot["latest"]]
+    selected = library.sort_rows([r for r in rows_all if library.matches(r, query)], query["sort"])
+    return {"ids": [r["id"] for r in selected], "total": len(selected)}
+
+
+def desktop_settings() -> dict:
+    """`GET /settings`: the one setting the Desktop half reads, fresh on every call."""
+    return {"starter_prompt": bool(_settings().get("starter_prompt", True))}
 
 
 def fork_shader(conn: sqlite3.Connection, base: Path, shader_id: str, body: dict) -> dict:

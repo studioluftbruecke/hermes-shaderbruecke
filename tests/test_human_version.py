@@ -60,6 +60,13 @@ def test_a_save_becomes_a_human_version_and_the_next_turn_hears_of_it_once(lib):
     assert shaderbruecke.on_pre_llm_call(session_id="s1", user_message="again") is None
 
 
+def test_the_next_turn_never_names_a_deleted_shader(lib):
+    conn, base, _calls = lib
+    library_api.save_version(conn, base, "a-sky", {"source": SOURCE.replace("1.0", "0.5"), "base_version": 1})
+    record.delete(conn, base, "a-sky")
+    assert shaderbruecke.on_pre_llm_call(session_id="s1", user_message="hi") is None
+
+
 def test_a_stale_base_is_refused_with_the_latest_version(lib):
     conn, base, calls = lib
     library_api.save_version(conn, base, "a-sky", {"source": SOURCE, "base_version": 1})

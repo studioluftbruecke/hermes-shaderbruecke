@@ -411,13 +411,14 @@ def fork(conn: sqlite3.Connection, base: Path, shader_id: str, name: str | None 
     return save(conn, record)
 
 
-def set_slider_values(conn: sqlite3.Connection, shader_id: str, values: dict[str, float]) -> dict | None:
-    """Merge the human's slider values into `tuned_values` of the latest version.
+def set_slider_values(conn: sqlite3.Connection, shader_id: str, values: dict[str, float],
+                      version: int | None = None) -> dict | None:
+    """Merge the human's slider values into `tuned_values` of one version (default: the latest).
 
     Only names the record declares are kept, only finite numbers, clamped to the slider's range.
     `slider_values` mirrors the result for readers written before `tuned_values` existed.
     """
-    record = latest(conn, shader_id)
+    record = latest(conn, shader_id) if version is None else get_version(conn, shader_id, version)
     if record is None:
         return None
     sliders = {slider["name"]: slider for slider in record.get("sliders") or []}
@@ -433,9 +434,10 @@ def set_slider_values(conn: sqlite3.Connection, shader_id: str, values: dict[str
     return save(conn, record)
 
 
-def reset_tuned_values(conn: sqlite3.Connection, shader_id: str) -> dict | None:
-    """Forget the human's values on the latest version: every slider is back at its default."""
-    record = latest(conn, shader_id)
+def reset_tuned_values(conn: sqlite3.Connection, shader_id: str, version: int | None = None) -> dict | None:
+    """Forget the human's values on one version (default: the latest): every slider is back at its
+    default."""
+    record = latest(conn, shader_id) if version is None else get_version(conn, shader_id, version)
     if record is None:
         return None
     record["tuned_values"] = {}
@@ -600,13 +602,18 @@ def legacy_folders(conn: sqlite3.Connection, base: Path) -> list[dict]:
 
 
 def delete(conn: sqlite3.Connection, base: Path, shader_id: str) -> None:
-    """Every version, the meta and the files of one shader (D17: the archive's delete forever)."""
+    """Every version, the meta, the pending Lab notices and the files of one shader. Under the
+    shader's lock, so a render that lands meanwhile finds the shader gone instead of storing it
+    again as v1. Files an export copied into a project folder are not ours and stay."""
     folder = shader_dir(base, shader_id)
-    conn.execute("DELETE FROM shaders WHERE id = ?", (shader_id,))
-    conn.execute("DELETE FROM shader_meta WHERE id = ?", (shader_id,))
-    conn.commit()
-    shutil.rmtree(folder, ignore_errors=True)
-    shutil.rmtree(_scratch_root(base, shader_id), ignore_errors=True)
+    ensure_schema(conn)
+    with shader_lock(base, shader_id):
+        conn.execute("DELETE FROM shaders WHERE id = ?", (shader_id,))
+        conn.execute("DELETE FROM shader_meta WHERE id = ?", (shader_id,))
+        conn.execute("DELETE FROM human_notices WHERE id = ?", (shader_id,))
+        conn.commit()
+        shutil.rmtree(folder, ignore_errors=True)
+        shutil.rmtree(_scratch_root(base, shader_id), ignore_errors=True)
 
 
 # ---------------------------------------------------------------- v0.2: Lab saves reach the agent (F40)

@@ -40,7 +40,9 @@ SHADER_RENDER = {
         "describe the result; then put the `media` line on its own line in your reply so Hermes "
         "Desktop plays the shader live. A `MEDIA:` line is only returned for a render that is not "
         "flat and not flash-blocked. Pass `id` to keep a new version of an existing shader and "
-        "`parent_id` to fork one; versions are kept and listed by shader_library. Budget: about "
+        "`parent_id` to fork one; versions are kept and listed by shader_library. The same source as "
+        "the latest version of `id` writes no new version: the result is that version with "
+        "`unchanged: true`. To show an existing version, call shader_library play instead. Budget: about "
         "three renders per request; a fourth version of one shader within 15 minutes is refused "
         "unless the user asked for more and you pass keep_iterating=true."
     ),
@@ -78,22 +80,25 @@ SHADER_RENDER = {
     },
 }
 
-LIBRARY_ACTIONS = ("list", "get", "fork", "rename", "tag", "archive", "unarchive", "set_licence", "import",
-                   "share")
+LIBRARY_ACTIONS = ("list", "get", "play", "fork", "rename", "tag", "archive", "unarchive", "set_licence",
+                   "import", "share")
 
 SHADER_LIBRARY = {
     "name": "shader_library",
     "description": (
-        "The shaders this profile has rendered (the Shaders page in Desktop shows the same library). "
+        "The shaders this profile has rendered (the Shaderbrücke page in Desktop shows the same library). "
         "`list` returns the newest 20 (id, name, version, states, licence, tags, thumbnail), filtered by "
         "q, state, tag, starred or archived, with a `cursor` for the next page. `get` returns one full "
         "record: source, slider specs, `tuned_values` "
         "(the human's slider settings from Desktop), `effective_values` (what every export uses), "
-        "checks and provenance. Read them before an export or a new version. `fork` copies a "
+        "checks and provenance. Read them before an export or a new version. `play` shows one version "
+        "(default latest) in the chat as the live card with its sliders, without rendering or writing a "
+        "version: put its `media` line on its own line in your reply. A `MEDIA:` line becomes that card "
+        "only from a `play`, `import` or shader_render result, so never copy a path from `get`. `fork` copies a "
         "shader (or one `version` of it) into a new id and records the lineage, so you can change "
         "it without losing the original. `rename`, `tag` (the full list) and `archive` / `unarchive` "
-        "organise the library on the user's request; there is no delete (the user deletes from the "
-        "archive in Desktop). `set_licence` sets the licence the user picked: it is "
+        "organise the library on the user's request; there is no delete (the user deletes in "
+        "Desktop). `set_licence` sets the licence the user picked: it is "
         "stamped on the latest version and every later one, earlier versions keep theirs, and a "
         "licence inherited from an imported original (NC or SA) cannot be replaced. `import` brings "
         "in a share file (`path`) or a pasted shader (`source` with `url`, `author`, `licence` as "
@@ -104,8 +109,8 @@ SHADER_LIBRARY = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(LIBRARY_ACTIONS)},
-            "id": {"type": "string", "description": "Shader id for get and fork."},
-            "version": {"type": "integer", "description": "Version for get and fork (default: latest)."},
+            "id": {"type": "string", "description": "Shader id for get, play, fork and the organising actions."},
+            "version": {"type": "integer", "description": "Version for get, play, fork and share (default: latest)."},
             "name": {"type": "string", "description": "Title for the fork, or the new name for rename."},
             "limit": {"type": "integer", "description": "How many rows `list` returns (max 50)."},
             "q": {"type": "string", "description": "For list: part of a name, id or tag."},
@@ -267,10 +272,15 @@ def shader_render(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": _id_error("parent_id", parent_id)})
 
     conn, base = _storage()
-    with contextlib.closing(conn), renderer.chromium_slots(Path(base) / "locks"):
-        return _render(conn, base, source=source, name=name, t=t, requested_id=requested_id,
-                       parent_id=parent_id, keep=settings_mod.read_settings()["keep_versions"],
-                       keep_iterating=args.get("keep_iterating") is True)
+    with contextlib.closing(conn):
+        # Same source as the latest version: that version again, not a duplicate with no tuned values.
+        newest = record.latest(conn, requested_id) if requested_id and not parent_id else None
+        if newest is not None and newest.get("source") == source:
+            return json.dumps(_card_payload(conn, newest, unchanged=True))
+        with renderer.chromium_slots(Path(base) / "locks"):
+            return _render(conn, base, source=source, name=name, t=t, requested_id=requested_id,
+                           parent_id=parent_id, keep=settings_mod.read_settings()["keep_versions"],
+                           keep_iterating=args.get("keep_iterating") is True)
 
 
 def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id: str | None = None,
@@ -383,6 +393,12 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
     # landed while this one was in the browser.
     with record.shader_lock(base, shader_id):
         newest = record.latest(conn, shader_id)
+        if previous is not None and newest is None:
+            # Deleted while this render ran: storing it would bring the shader back as v1.
+            gone = {"success": False, "status": "not_found", "id": shader_id,
+                    "error": f"shader {shader_id} was deleted while this render ran; nothing was stored"}
+            shutil.rmtree(out_dir, ignore_errors=True)
+            return json.dumps(gone)
         moved = (adopt is not None and newest is not None) or (
             expected_base is not None and int((newest or {}).get("version") or 0) != expected_base)
         if moved:
@@ -547,10 +563,19 @@ def _library(conn, base, action: str, shader_id: str, args: dict) -> str:
             found["record_name"], found["name"] = found.get("name"), meta["name"]
         found["tuned_values"] = record.tuned_values(found)
         found["effective_values"] = record.effective_values(found)
-        return json.dumps({"success": True, "shader": found,
+        return json.dumps({"success": True, "shader": _without_frag(found),
                            "next": ("`tuned_values` are the human's slider settings and "
                                     "`effective_values` what every export uses. Keep them as the "
                                     "`@slider` defaults when you write the next version.")})
+
+    if action == "play":
+        version = args.get("version")
+        found = (record.get_version(conn, shader_id, int(version)) if isinstance(version, (int, float))
+                 else record.latest(conn, shader_id))
+        if found is None:
+            return json.dumps({"success": False, "error": f"no shader {shader_id}"
+                                                          + (f" version {version}" if version else "")})
+        return json.dumps(_card_payload(conn, found, unchanged=False))
 
     if action in ("rename", "tag", "archive", "unarchive"):
         return json.dumps(_organise(conn, shader_id, action, args))
@@ -566,7 +591,59 @@ def _library(conn, base, action: str, shader_id: str, args: dict) -> str:
                          version=int(version) if isinstance(version, (int, float)) else None)
     if forked is None:
         return json.dumps({"success": False, "error": f"no shader {shader_id} to fork"})
-    return json.dumps({"success": True, "shader": forked, "parent_id": shader_id})
+    return json.dumps({"success": True, "shader": _without_frag(forked), "parent_id": shader_id})
+
+
+def _without_frag(doc: dict) -> dict:
+    """The record without its `.frag` path. Desktop draws a `MEDIA:` line with the card of the FIRST
+    tool result that names the path, so a `get` or `fork` naming it would take over the line of a
+    later `play` in the same turn and show a plain file instead of the card."""
+    files = {key: value for key, value in (doc.get("files") or {}).items() if key != "frag"}
+    return {**doc, "files": files}
+
+
+def _no_autoplay_reason(doc: dict) -> str | None:
+    """Why a stored version gets no `MEDIA:` line, or None when it may play by itself: the same
+    rules as an import (`library.autoplay`, not flat) plus a frag that is still on disk."""
+    checks_ = doc.get("checks") or {}
+    frag = (doc.get("files") or {}).get("frag")
+    if checks_.get("flat") is True:
+        return "its frames are flat (one colour or black), so it does not play by itself"
+    verdict = library.flash_verdict(doc)
+    if checks_.get("status") != "ok":
+        return (f"its server check is {checks_.get('status') or 'missing'}, and only a version that "
+                "passed the check plays by itself")
+    if verdict != "none":
+        return (f"its flash check is {verdict or 'missing'}, and only a version with flash verdict "
+                "none plays by itself")
+    if not frag or not Path(frag).is_file():
+        return "its shader.frag is no longer on disk; render the source again to play it"
+    return None
+
+
+def _card_payload(conn, doc: dict, *, unchanged: bool) -> dict:
+    """What the Desktop card reads from a render result, for a version that already exists: `play`
+    and a render whose source equals the latest version's. Writes nothing."""
+    meta = record.get_meta(conn, doc["id"])
+    frag = (doc.get("files") or {}).get("frag")
+    payload = {"success": True, "id": doc["id"], "version": doc["version"],
+               "name": (meta or {}).get("name") or doc.get("name"), "frag_path": frag,
+               "sliders": doc.get("sliders") or [], "tuned_values": record.tuned_values(doc),
+               "checks": doc.get("checks") or {},
+               "contact_sheet": (doc.get("files") or {}).get("contact_sheet")}
+    if unchanged:
+        payload["unchanged"] = True
+    head = (f"Nothing changed: this source is v{doc['version']}, so no new version was written. "
+            if unchanged else "Nothing was rendered and no version was written. ")
+    reason = _no_autoplay_reason(doc)
+    if reason is None:
+        payload["media"] = f"MEDIA:{frag}"
+        payload["next"] = (head + "Put the `media` line on its own line in your reply: Desktop plays "
+                           f"v{doc['version']} live with its sliders, and slider moves save on v{doc['version']}.")
+    else:
+        payload["warning"] = f"no media line: {reason}"
+        payload["next"] = head + f"Tell the user why it does not play here: {reason}."
+    return payload
 
 
 def _list(conn, base, args: dict) -> dict:
@@ -619,9 +696,9 @@ def _organise(conn, shader_id: str, action: str, args: dict) -> dict:
     archived = action == "archive"
     record.update_meta(conn, shader_id, archived_at=record.now_iso() if archived else None)
     return {"success": True, "id": shader_id, "archived": archived,
-            "next": ("Archived shaders leave the Shaders page and `list`; `list` with archived=true shows them, "
-                     "and only the user can delete them, from the archive in Desktop.") if archived else
-                    "The shader is back on the Shaders page."}
+            "next": ("Archived shaders leave the Shaderbrücke page and `list`; `list` with archived=true shows "
+                     "them, and only the user can delete a shader, in Desktop.") if archived else
+                    "The shader is back on the Shaderbrücke page."}
 
 
 def _tool_import(conn, base, args: dict) -> dict:
@@ -644,7 +721,12 @@ def _tool_import(conn, base, args: dict) -> dict:
         return {"success": False, **{k: v for k, v in answer.items() if k != "ok"},
                 "next": "Tell the user why it did not land; fix only what the diagnostics name if they asked you to."}
     newest = record.latest(conn, answer["id"]) or {}
+    meta = record.get_meta(conn, answer["id"])
+    # The card reads name, sliders and tuned values from the result: the import's own arguments are
+    # the pasted original, not the converted source the frag holds.
     result = {"success": True, **{k: v for k, v in answer.items() if k != "ok"},
+              "name": (meta or {}).get("name") or newest.get("name"), "sliders": newest.get("sliders") or [],
+              "tuned_values": record.tuned_values(newest),
               "next": "Tell the user every warning (licence first). Exports and forks of this shader keep its licence."}
     if library.autoplay(newest) and (newest.get("checks") or {}).get("flat") is not True:
         result["media"] = f"MEDIA:{(newest.get('files') or {}).get('frag')}"
@@ -673,7 +755,7 @@ def _tool_share(conn, base, shader_id: str, args: dict) -> dict:
         target = Path(str(args["dest_dir"])) / answer["filename"]
         shutil.copyfile(path, target)
         payload["copied_to"] = str(target)
-    payload["next"] = ("Anyone with Shaderbrücke imports this file (Shaders page, Import, or shader_library import). "
+    payload["next"] = ("Anyone with Shaderbrücke imports this file (the Shaderbrücke page, Import, or shader_library import). "
                        "It carries the licence, author and lineage as claims.")
     return payload
 
@@ -825,6 +907,9 @@ def share_file(conn, base, shader_id: str, version: int | None = None, settings:
     return {"filename": library.slug(share["name"]) + library.SHARE_SUFFIX, "share": share}
 
 
+SHADER_DELETED = "This shader was deleted."
+
+
 def save_human_version(conn, base, shader_id: str, source, base_version) -> dict:
     """F40: the Lab's Save. The user's source is linted and rendered like the agent's; on success it
     becomes the next version with `author_kind: human`, and the agent's next turn is told
@@ -838,7 +923,7 @@ def save_human_version(conn, base, shader_id: str, source, base_version) -> dict
         return {"refused": 400, "error": "bad_request", "message": "base_version (the version you edited) is required"}
     newest = record.latest(conn, shader_id)
     if newest is None:
-        return {"refused": 404, "error": "not_found", "message": f"no shader {shader_id}"}
+        return {"refused": 404, "error": "not_found", "message": SHADER_DELETED}
     if int(newest["version"]) != base_version:
         return {"refused": 409, "error": "stale_base", "latest": int(newest["version"]),
                 "message": f"a newer version exists (v{newest['version']}); you edited v{base_version}"}
@@ -851,6 +936,8 @@ def save_human_version(conn, base, shader_id: str, source, base_version) -> dict
     if not rendered.get("success"):
         if rendered.get("status") == "busy":
             return {"refused": 409, "error": "busy", "message": str(rendered.get("error"))}
+        if rendered.get("status") == "not_found":
+            return {"refused": 404, "error": "not_found", "message": SHADER_DELETED}
         if rendered.get("status") == "stale_base":
             return {"refused": 409, "error": "stale_base", "latest": rendered["latest"],
                     "message": str(rendered.get("error"))}

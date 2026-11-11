@@ -146,7 +146,7 @@ def test_a_new_version_names_the_values_the_human_tuned_on_the_last_one(tmp_path
     connection = sqlite3.connect(db)
     RECORD.set_slider_values(connection, first["id"], {"sunHeight": 0.41})
     connection.close()
-    second = json.loads(PLUGIN.shader_render({"source": SKY, "id": first["id"]}))
+    second = json.loads(PLUGIN.shader_render({"source": SKY + "// a second look\n", "id": first["id"]}))
     assert second["success"] is True and second["version"] == 2
     assert second["tuned_values"] == {}
     assert second["previous_tuned_values"] == {"sunHeight": 0.41}
