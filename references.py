@@ -1,18 +1,13 @@
 """`@shader:<id>[@v<n>]`: one shader version as context for the agent's turn (F39).
 
-Two parts with different lifetimes:
+Hermes keeps one provider per prefix for the whole process, and that table is shared by every
+profile the gateway serves. So the provider (`make_shim`) decides per call: it answers only where
+the running profile's config enables Shaderbrücke, and `expand` / `complete` read that profile's
+library (plugin storage follows the active profile). Elsewhere it gives `None` / `[]`, as if the
+prefix did not exist. P17: source and sliders in full, tuned values, one line each for licence,
+lineage and the check; `shader_library get` for the rest.
 
-- The shim (`make_shim`) is what Hermes registers. Hermes keeps one provider per prefix for the
-  whole process, refuses a second registration and has no unregister, and that table is shared by
-  every profile the gateway serves. So the shim holds no logic of its own: on every call it finds
-  the plugin module of the **running profile** (that profile's plugin manager) and calls that
-  module's `references.expand` / `references.complete`. A profile whose loaded Shaderbrücke has no
-  `references` (older code), a disabled plugin, or a profile without it gets `None` / `[]`, as if
-  the prefix did not exist. Its code must stay compatible with every later version: change the
-  implementation below, never the shim.
-- The implementation (`expand`, `complete` and the pure functions they use) reads the running
-  profile's library. P17: source and sliders in full, tuned values, one line each for licence,
-  lineage and the check; `shader_library get` for the rest.
+The provider runs the code of the first Shaderbrücke the process loaded, for every profile.
 """
 
 from __future__ import annotations
@@ -177,60 +172,26 @@ def complete(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
         return complete_from(conn, query, limit)
 
 
-# ---------------------------------------------------------------- the shim (registered once)
+# ---------------------------------------------------------------- the provider (registered once)
 
-# config.yaml path -> (mtime_ns, enabled): autocomplete asks on every keystroke.
-_ENABLED: dict[str, tuple[int, bool]] = {}
-
-
-def _profile_enables_plugin() -> bool:
+def profile_enables_plugin() -> bool:
+    """Whether the running profile's config.yaml enables Shaderbrücke (Hermes caches the read)."""
     try:
-        from hermes_constants import get_hermes_home
-        try:
-            import hermes_yaml as yaml  # what Hermes itself reads config.yaml with
-        except ImportError:
-            import yaml
+        from hermes_cli.config import load_config
 
-        path = get_hermes_home() / "config.yaml"
-        stamp = path.stat().st_mtime_ns
-        cached = _ENABLED.get(str(path))
-        if cached and cached[0] == stamp:
-            return cached[1]
-        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        plugins = load_config().get("plugins")
     except Exception:
-        return True
-    plugins = config.get("plugins") if isinstance(config, dict) else None
-    enabled = isinstance(plugins, dict) and PLUGIN in (plugins.get("enabled") or []) \
+        return False
+    return isinstance(plugins, dict) and PLUGIN in (plugins.get("enabled") or []) \
         and PLUGIN not in (plugins.get("disabled") or [])
-    _ENABLED[str(path)] = (stamp, enabled)
-    return enabled
 
 
-def running_module():
-    """The Shaderbrücke module the running profile's plugin manager loaded, or None.
+def expand_if_enabled(target: str) -> str | None:
+    return expand(target) if profile_enables_plugin() else None
 
-    Reads the manager table without creating a manager, so a profile that never loaded plugins
-    stays untouched.
-    """
-    try:
-        from hermes_cli import plugins as hermes_plugins
-    except ImportError:
-        return None
-    try:
-        home = hermes_plugins._plugin_home_key()
-        manager = getattr(hermes_plugins, "_plugin_managers_by_home", {}).get(home)
-    except Exception:
-        return None
-    if manager is None:
-        return None
-    for loaded in list(getattr(manager, "_plugins", {}).values()):
-        manifest = getattr(loaded, "manifest", None)
-        if getattr(manifest, "name", None) != PLUGIN or not getattr(loaded, "enabled", False):
-            continue
-        module = getattr(loaded, "module", None)
-        if module is not None and _profile_enables_plugin():
-            return module
-    return None
+
+def complete_if_enabled(query: str, limit: int = 10) -> list[tuple[str, str, str]]:
+    return complete(query, limit) if profile_enables_plugin() else []
 
 
 def make_shim():
@@ -241,26 +202,15 @@ def make_shim():
         return None
     import asyncio
 
-    def implementation(name: str):
-        impl = getattr(running_module(), "references", None)
-        function = getattr(impl, name, None)
-        return function if callable(function) else None
-
     class ShaderReferences(ContextReferenceProvider):
         prefix = PREFIX
         description = DESCRIPTION
 
         async def expand(self, target: str):
-            function = implementation("expand")
-            if function is None:
-                return None
-            return await asyncio.to_thread(function, target)
+            return await asyncio.to_thread(expand_if_enabled, target)
 
         async def autocomplete(self, query: str, *, limit: int = 10) -> list:
-            function = implementation("complete")
-            if function is None:
-                return []
-            rows = await asyncio.to_thread(function, query, limit)
+            rows = await asyncio.to_thread(complete_if_enabled, query, limit)
             return [ContextCompletionItem(text=text, display=display, meta=meta)
                     for text, display, meta in rows]
 

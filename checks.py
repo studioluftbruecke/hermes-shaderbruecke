@@ -203,17 +203,24 @@ def frame_stats(lumas: Iterable[float]) -> tuple[float, float]:
     return mean, variance ** 0.5
 
 
-_STILL_SHARE = 0.002        # under 0.2% of pixels changed between every pair of frames: still
+STILL_SHARE = 0.002        # under 0.2% of pixels changed between every pair of frames: still
 
 
-def motion(frames: Sequence[dict]) -> dict:
+def motion(frames: Sequence[dict], late: Sequence[dict] = ()) -> dict:
     """`moving`, `still` or `unknown` from each frame's `moved` share (changed pixels against the
-    previous frame). `luma_mean` cannot answer this: drifting clouds keep it constant."""
+    previous frame). `luma_mean` cannot answer this: drifting clouds keep it constant.
+
+    `late` holds frames rendered only for this check ({t, moved} against the first frame). When the
+    contact frames look alike but a late frame differs, the shader moves slowly: `moving` with
+    `slow: true`, so a slow drift is not mistaken for a shader that ignores iTime."""
     moved = [frame["moved"] for frame in frames[1:] if isinstance(frame.get("moved"), (int, float))]
+    late = [{"t": f["t"], "moved": f["moved"]} for f in late if isinstance(f.get("moved"), (int, float))]
     if not moved:
-        return {"verdict": "unknown", "moved": [], "max": None}
+        return {"verdict": "unknown", "moved": [], "max": None, "late": late, "slow": False}
     peak = max(moved)
-    return {"verdict": "moving" if peak >= _STILL_SHARE else "still", "moved": moved, "max": peak}
+    slow = peak < STILL_SHARE and any(f["moved"] >= STILL_SHARE for f in late)
+    verdict = "moving" if peak >= STILL_SHARE or slow else "still"
+    return {"verdict": verdict, "moved": moved, "max": peak, "late": late, "slow": slow}
 
 
 def flat(frames: Sequence[dict]) -> bool:

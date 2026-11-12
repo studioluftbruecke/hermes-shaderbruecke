@@ -91,8 +91,9 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   and `--host-resolver-rules=MAP * ~NOTFOUND`, so **the network is blocked** (host names and IP
   addresses alike). `--webrtc-ip-handling-policy=disable_non_proxied_udp` closes the UDP path
   WebRTC would otherwise have; a probe sent STUN to an IP literal and nothing arrived. Proofs open
-  the plugin's own `headless/harness.html` from disk and add
-  `--allow-file-access-from-files` so it can load the vendored three.js. The child gets only PATH,
+  the plugin's own `headless/harness.html` under a placeholder origin: the browser asks the plugin
+  for each file over the DevTools pipe, and the plugin answers only from `headless/`, so the page
+  has no `file://` access and reads no other local file. The child gets only PATH,
   locale and a short temp folder from the environment, never the gateway's API keys. It starts
   through a one-line `/bin/sh` launcher that turns core dumps off and runs it inside its throwaway
   profile. A hard deadline (30 s per render, 90 s per proof) kills the whole process group. At most
@@ -119,7 +120,11 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   on. Under `plugins.isolation: host` the plugin cannot tell a one-shot `hermes -z` run from a
   terminal chat, so there it refuses `dest_dir` on the terminal surface too (Desktop still works).
   Names, authors and other text that enter a generated file are cleaned of line breaks and
-  comment terminators, so they cannot add code.
+  comment terminators, so they cannot add code. The TSL transpiler reads the shader without
+  comments and with its `#define` macros already expanded, and only after the GLSL compiler
+  accepted that exact text. A quote, a backslash, a non-ASCII character or an `#if` block outside
+  comments makes the TSL export refuse instead, so a shader cannot carry JavaScript into the
+  `.tsl.js` file.
 - **No telemetry, no accounts, no network calls.** There are no credentials to configure.
 - **Desktop half.** Draws the `.frag` the tool produced, runs the same lint locally before a local
   compile, and talks only to the plugin's own API (`/api/plugins/shaderbruecke/…`) to read the
@@ -142,6 +147,15 @@ delete it.
 
 ## Changes
 
+- **0.2.3:** fixes from the catalog review. The proof page no longer gets `file://` access: it
+  loads from the plugin's own `headless/` folder over the DevTools pipe and can read no other local
+  file. The TSL transpiler reads the shader with comments removed and macros expanded, only after
+  the GLSL compiler accepted that text, and the export refuses a quote, a backslash, a non-ASCII
+  character or an `#if` block outside comments, so an imported shader cannot put JavaScript into
+  the module. A macro call split over two lines now exports correctly. `@shader:` checks the
+  running profile's config through Hermes' own loader and no longer reads plugin-manager
+  internals. A shader that drifts slowly is no longer called still: the motion check also looks
+  at t = 10 and 30 s.
 - **0.2.2:** Shaderbrücke has its own page under Settings → Plugins, so the plugin is listed once,
   under its name. The page shows or hides the sidebar row and sets its position (52, below
   Kanban, kept per Desktop), and opens the agent settings beneath it. Needs Hermes 0.23.0.

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import record, renderer
 from . import settings as settings_mod
-from .exporters import registry, tsl
+from .exporters import registry, tsl, tsl_input
 from .exporters.header import licence_text, pascal
 
 PROOF_MEAN_LIMIT = 2.0     # 2/255
@@ -66,8 +66,13 @@ def harness(expression: str, out_dir: Path, timeout_s: float = 90.0) -> dict:
 
 
 def raw_transpile(document: dict, out_dir: Path) -> dict:
-    """three r187's raw transpiler output for the record's source, or ``{"error": ...}``."""
-    params = {"source": document.get("source") or "",
+    """three r187's raw transpiler output for the record's source, or ``{"error": ...}``.
+
+    The transpiler reads `tsl_input.prepare` (no comments, no directives), and the harness compiles
+    that exact text as GLSL first, so it never turns text the GLSL compiler refused into JavaScript.
+    Call `tsl.guard` first: a source it refuses raises `tsl_input.Refused` here.
+    """
+    params = {"source": tsl_input.prepare(document.get("source") or ""),
               "sliders": {s["name"]: s["default"] for s in document.get("sliders") or []}}
     result = harness(f"return H.transpileRaw({json.dumps(params)});", out_dir)
     if result.get("status") in {"not_ready", "timeout", "browser_error", "exception", "no_browser",

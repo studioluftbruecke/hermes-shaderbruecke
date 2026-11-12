@@ -216,7 +216,7 @@ def _check_report(bundle: renderer.BundleResult, flash: dict, lint: list[dict]) 
         "frames": bundle.frames,
         "contact_sheet": bundle.contact_sheet,
         "flat": checks.flat(bundle.frames),
-        "motion": checks.motion(bundle.frames),
+        "motion": checks.motion(bundle.frames, bundle.late),
         "flash": flash,
         "wall_ms": bundle.wall_ms,
         "draw_ms": bundle.draw_ms,
@@ -499,9 +499,17 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
                             "of this shader in 15 minutes, and a further one is refused without "
                             "keep_iterating=true. Show it now with the media line and offer further "
                             "changes in words.")
+    late = report["motion"]["late"]
+    late_text = ", ".join(f"{frame['t']:g}" for frame in late)
     if report["motion"]["verdict"] == "still" and not is_flat:
-        payload["next"] += (f" The frames at t = {times_text} s are the same picture: the shader does not "
+        seen = f"{times_text}, {late_text}" if late_text else times_text
+        payload["next"] += (f" The frames at t = {seen} s are the same picture: the shader does not "
                             "move. If it should animate, check that iTime reaches the visible part.")
+    elif report["motion"]["slow"]:
+        first = next(frame for frame in late if frame["moved"] >= checks.STILL_SHARE)
+        payload["next"] += (f" The shader moves slowly: the frames at t = {times_text} s look alike, but "
+                            f"{first['moved']:.0%} of pixels differ by t = {first['t']:g} s. That is motion, "
+                            "not a bug; speed it up only if the user wants visible movement within seconds.")
     elif report["motion"]["verdict"] == "moving":
         share = report["motion"]["max"]
         payload["next"] += (f" checks.motion is `moving` (up to {share:.0%} of pixels change between frames), "
@@ -1044,8 +1052,8 @@ def register(ctx) -> None:
         ctx.register_cli_command(name="shaderbruecke", help="Shaderbrücke library maintenance",
                                  setup_fn=_cli_setup, handler_fn=_cli,
                                  description="thumbs: backfill thumbnails; adopt: adopt old flat folders")
-    # `@shader:` (F39). The shim resolves the running profile's own module on every call, so it is
-    # registered once per process and later loads (other profiles, reloads) are refused harmlessly.
+    # `@shader:` (F39). The provider checks the running profile on every call, so it is registered
+    # once per process and later loads (other profiles, reloads) are refused harmlessly.
     shim = references.make_shim()
     if shim is not None and hasattr(ctx, "register_context_reference"):
         ctx.register_context_reference(shim)

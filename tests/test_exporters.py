@@ -207,6 +207,88 @@ def test_tsl_guard_refuses_what_the_decoder_cannot_take():
                                 "{ fragColor = vec4(iTime); }"}) is None
 
 
+SMUGGLE = "x' + (globalThis.SB_PWNED = 1) + '"
+TSL_BODY = ("void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n{}"
+            "  fragColor = vec4(fragCoord / iResolution.xy, 0.5, 1.0);\n}\n")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_a_continued_comment_hides_its_next_line_from_the_transpiler(newline):
+    """GLSL splices `\\` + newline before it looks for comments, so the quoted line below is part of
+    the comment: the transpiler must not read it either, or it lands in the module as JavaScript."""
+    from shaderbruecke.exporters import tsl, tsl_input
+
+    lines = f'  // a note \\\n  float k = length(vec2("{SMUGGLE}"));\n'
+    source = TSL_BODY.replace("{}", lines).replace("\n", newline)
+    read = tsl_input.prepare(source)
+    assert not set("\"'\\") & set(read) and "SB_PWNED" not in read
+    assert read.count("\n") == source.replace("\r\n", "\n").replace("\r", "\n").count("\n")
+    assert tsl.guard({"source": source}) is None
+
+
+@pytest.mark.parametrize("lines, refused", [
+    (f'  float k = length(vec2("{SMUGGLE}"));\n', "'\"' on line 2"),
+    (f"#ifndef GL_ES\n  float k = length(vec2('{SMUGGLE}'));\n#endif\n", "on line 3"),
+    ("  float k = 1.0 \\ 2.0;\n", "'\\\\' on line 2"),
+    ("  float k = 1.0; // ok\n  float j = k\u00b7k;\n", "'·' on line 3"),
+    ("  float k = 1.0;\u200b\n", "U+200B on line 2"),
+    ("  float k = 1.0; /* $ in a comment is fine */ float j = $k;\n", "'$' on line 2"),
+    ("#ifndef GL_ES\n  float k = eval(String.fromCharCode(103, 108));\n#endif\n", "`#ifndef` on line 2"),
+    ("#define AA 2\n#if AA > 1\n  float k = 1.0;\n#endif\n", "`#if` on line 3"),
+])
+def test_tsl_guard_refuses_what_the_transpiler_would_copy_into_javascript(lines, refused):
+    from shaderbruecke.exporters import tsl
+
+    reason = tsl.guard({"source": TSL_BODY.replace("{}", lines)})
+    assert reason and refused in reason, reason
+
+
+def test_quotes_and_apostrophes_in_comments_still_export():
+    from shaderbruecke.exporters import tsl, tsl_input
+
+    source = ('// @slider haze 0.0..2.0 = 1.0 "Haze"\n/* it\'s a "sky" */\n'
+              + TSL_BODY.replace("{}", "  // don't touch\n"))
+    assert tsl.guard({"source": source}) is None
+    assert "haze" not in tsl_input.prepare(source)
+
+
+CHAR_CODES = ", ".join(str(ord(c)) for c in "globalThis.SB_PWNED=1")
+
+
+def test_the_transpiler_reads_no_directive_and_macros_expand_as_in_glsl():
+    """three's expander works line by line: a call split over two lines stayed a call to `eval`,
+    with an argument GLSL had dropped. The transpiler now reads the expansion, not the macros."""
+    from shaderbruecke.exporters import tsl, tsl_input
+
+    source = ("#define eval(x) 1.0\n#define rot(a) mat2(cos(a), sin(a), -sin(a), cos(a))\n"
+              "#define TAU 6.2831853\n#define HIGH float(GL_ES + __VERSION__)\n"
+              + TSL_BODY.replace("{}", f"  float k = eval\n  (String.fromCharCode({CHAR_CODES}));\n"
+                                       "  vec2 q = rot(TAU * 0.25) * vec2(k, HIGH);\n"
+                                       "#undef TAU\n  float TAU = 1.0e-5;\n"))
+    read = tsl_input.prepare(source)
+    assert "#" not in read and "eval" not in read and "fromCharCode" not in read
+    assert "mat2(cos(6.2831853 * 0.25), sin(6.2831853 * 0.25)" in read
+    assert "float(1 + 300)" in read and "float TAU = 1.0e-5;" in read
+    assert read.count("\n") == source.count("\n")
+    assert tsl.guard({"source": source}) is None
+
+
+@pytest.mark.parametrize("lines, refused", [
+    ("#define A x x\n#define B A A\n#define C B B\n#define D C C\n#define E D D\n#define F E E\n"
+     "#define G F F\n#define H G G\n#define I H H\n#define J I I\n#define K J J\n#define L K K\n"
+     "#define M L L\n#define N M M\n#define O N N\n#define P O O\n#define Q P P\n#define R Q Q\n"
+     "  float k = R;\n", "more than"),
+    ("#define F(a, b) a\n  float k = F(1.0);\n", "takes 2 arguments"),
+    ("#define F(a) a\n  float k = F(1.0\n#define G 1\n  );\n", "not closed"),
+    ("#extension GL_OES_standard_derivatives : enable\n", "`#extension` on line 2"),
+])
+def test_tsl_input_refuses_macros_it_cannot_expand_safely(lines, refused):
+    from shaderbruecke.exporters import tsl
+
+    reason = tsl.guard({"source": TSL_BODY.replace("{}", lines)})
+    assert reason and refused in reason, reason
+
+
 def test_tsl_module_carries_the_header():
     from shaderbruecke.exporters import tsl
 

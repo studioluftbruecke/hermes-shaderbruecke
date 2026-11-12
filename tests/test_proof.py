@@ -109,3 +109,56 @@ def test_tsl_matrix_constructor_matches_glsl(tmp_path):
     files = TSL.files(document, {"credit": True, "raw": raw["text"]})
     proof = EXPORTING.prove_tsl(document, files, tmp_path)
     assert proof["verdict"] == "match", proof
+
+
+def _plain(source: str) -> dict:
+    return {"id": "t", "version": 1, "name": "plain", "sliders": [], "slider_values": {},
+            "channels": [], "created_at": "x", "files": {}, "edited_by": "agent",
+            "provenance": {"origin": "import", "url": None, "author": None, "licence": None, "parent": None},
+            "checks": {"status": "ok"}, "source": source}
+
+
+@pytest.mark.chromium
+def test_a_quoted_line_after_a_continued_comment_stays_out_of_the_module(tmp_path):
+    """Catalog review #154066: the line after `// ...\\` is a comment to GLSL, so it never reaches
+    the module, and the module still renders like the source."""
+    document = _plain("void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+                      "  // a note \\\n"
+                      "  float k = length(vec2(\"x' + (globalThis.SB_PWNED = 1) + '\"));\n"
+                      "  fragColor = vec4(fragCoord / iResolution.xy, 0.5, 1.0);\n}\n")
+    assert TSL.guard(document) is None
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
+    assert raw.get("text") and "SB_PWNED" not in raw["text"], raw
+    files = TSL.files(document, {"credit": True, "raw": raw["text"]})
+    proof = EXPORTING.prove_tsl(document, files, tmp_path)
+    assert proof["verdict"] == "match", proof
+
+
+@pytest.mark.chromium
+def test_the_transpiler_never_reads_what_the_glsl_compiler_refused(tmp_path):
+    """No quote is needed to build JavaScript from GLSL-looking text, so the harness compiles the
+    exact text first and refuses it before the encoder sees it."""
+    codes = ", ".join(str(ord(c)) for c in "globalThis.SB_PWNED=1")
+    document = _plain("void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+                      f"  float k = eval(String.fromCharCode({codes}));\n"
+                      "  fragColor = vec4(k);\n}\n")
+    assert TSL.guard(document) is None
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
+    assert "text" not in raw and "GLSL compiler refused" in raw["error"], raw
+
+
+@pytest.mark.chromium
+def test_a_macro_call_over_two_lines_reaches_the_module_expanded(tmp_path):
+    """GLSL expands `eval\\n(...)` and drops the argument; three's line-based expander left a live
+    `eval(String.fromCharCode(...))` in the module. The transpiler now reads the expansion."""
+    codes = ", ".join(str(ord(c)) for c in "globalThis.SB_PWNED=1")
+    document = _plain("#define eval(x) 1.0\n"
+                      "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+                      f"  float k = eval\n  (String.fromCharCode({codes}));\n"
+                      "  fragColor = vec4(fragCoord / iResolution.xy, 0.5 * k, 1.0);\n}\n")
+    assert TSL.guard(document) is None
+    raw = EXPORTING.raw_transpile(document, tmp_path / "raw")
+    assert raw.get("text") and "fromCharCode" not in raw["text"], raw
+    files = TSL.files(document, {"credit": True, "raw": raw["text"]})
+    proof = EXPORTING.prove_tsl(document, files, tmp_path)
+    assert proof["verdict"] == "match", proof

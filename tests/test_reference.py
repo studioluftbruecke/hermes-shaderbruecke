@@ -1,10 +1,12 @@
-"""`@shader:` (F39): target parsing, the expansion text (P17's rule), completions, and the shim's
-profile scoping (P22) against a stand-in for Hermes' plugin-manager table."""
+"""`@shader:` (F39): target parsing, the expansion text (P17's rule), completions, and the
+provider's profile scoping (P22) against real Hermes config and plugin storage."""
 
+import json
+import os
 import pathlib
 import sqlite3
+import subprocess
 import sys
-from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -85,43 +87,6 @@ def test_completions_match_names_and_show_them_with_a_hyphen(conn):
     assert len(references.complete_from(conn, "", 10)) == 2
 
 
-def _install_fake_hermes(monkeypatch, home, managers):
-    fake = ModuleType("hermes_cli.plugins")
-    fake._plugin_home_key = lambda: home
-    fake._plugin_managers_by_home = managers
-    package = ModuleType("hermes_cli")
-    package.plugins = fake
-    monkeypatch.setitem(sys.modules, "hermes_cli", package)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake)
-    monkeypatch.setattr(references, "_profile_enables_plugin", lambda: True)
-
-
-def _loaded(module, *, enabled=True, name="shaderbruecke"):
-    return SimpleNamespace(manifest=SimpleNamespace(name=name), enabled=enabled, module=module)
-
-
-def test_the_shim_resolves_the_running_profiles_module(monkeypatch):
-    new = SimpleNamespace(references=SimpleNamespace(expand=lambda t: "new code"))
-    old = SimpleNamespace()  # v0.1.1: no `references`
-    managers = {"/p/sb-v02": SimpleNamespace(_plugins={"shaderbruecke": _loaded(new)}),
-                "/p/coding": SimpleNamespace(_plugins={"shaderbruecke": _loaded(old)}),
-                "/p/other": SimpleNamespace(_plugins={})}
-    _install_fake_hermes(monkeypatch, "/p/sb-v02", managers)
-    assert references.running_module() is new
-    _install_fake_hermes(monkeypatch, "/p/coding", managers)
-    assert getattr(references.running_module(), "references", None) is None
-    _install_fake_hermes(monkeypatch, "/p/other", managers)
-    assert references.running_module() is None
-    _install_fake_hermes(monkeypatch, "/p/never-loaded", managers)
-    assert references.running_module() is None
-
-
-def test_a_disabled_plugin_is_not_resolved(monkeypatch):
-    managers = {"/p/x": SimpleNamespace(_plugins={"shaderbruecke": _loaded(object(), enabled=False)})}
-    _install_fake_hermes(monkeypatch, "/p/x", managers)
-    assert references.running_module() is None
-
-
 def test_outside_hermes_there_is_no_shim(monkeypatch):
     # Simulate "outside Hermes" whatever the environment: check.sh puts Hermes' source on
     # PYTHONPATH, where agent.context_references imports and make_shim() returns a provider.
@@ -130,24 +95,51 @@ def test_outside_hermes_there_is_no_shim(monkeypatch):
     assert references.make_shim() is None
 
 
-def test_the_config_is_read_again_only_when_it_changed(tmp_path, monkeypatch):
-    import os
+def _hermes_python() -> pathlib.Path | None:
+    """The interpreter that runs Hermes: HERMES_PYTHON (scripts/check.sh sets it), else /opt/hermes's."""
+    for candidate in (os.environ.get("HERMES_PYTHON", ""), "/opt/hermes/.venv/bin/python"):
+        if candidate and pathlib.Path(candidate).exists():
+            return pathlib.Path(candidate)
+    return None
 
-    config = tmp_path / "config.yaml"
-    config.write_text("plugins:\n  enabled: [shaderbruecke]\n")
-    fake = ModuleType("hermes_constants")
-    fake.get_hermes_home = lambda: tmp_path
-    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
-    fake_yaml = ModuleType("hermes_yaml")
-    fake_yaml.safe_load = lambda text: {"plugins": {"enabled": ["shaderbruecke"] if "shaderbruecke" in text else []}}
-    monkeypatch.setitem(sys.modules, "hermes_yaml", fake_yaml)
-    reads = []
-    real_read = pathlib.Path.read_text
-    monkeypatch.setattr(pathlib.Path, "read_text",
-                        lambda self, *a, **k: (reads.append(self), real_read(self, *a, **k))[1])
-    assert references._profile_enables_plugin() and references._profile_enables_plugin()
-    assert len(reads) == 1
-    config.write_text("plugins:\n  enabled: []\n")
-    stat = config.stat()
-    os.utime(config, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
-    assert references._profile_enables_plugin() is False and len(reads) == 2
+
+PROFILE_SCRIPT = """
+import asyncio, json, os, pathlib, sys
+from shaderbruecke import record, references
+root, doc = pathlib.Path(sys.argv[1]), json.loads(sys.argv[2])
+shim, target, seen = references.make_shim(), doc["id"], {}
+for name, enabled in (("studio", True), ("empty", True), ("off", False)):
+    home = root / name
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "plugins:\\n  enabled: " + ("[shaderbruecke]" if enabled else "[]") + "\\n")
+    os.environ["HERMES_HOME"] = str(home)
+    if name == "studio":
+        closing, _base = references._storage()
+        with closing as conn:
+            record.save(conn, doc)
+    if name == "off":
+        (home / "plugin-data").mkdir()
+        (home / "plugin-data" / "shaderbruecke").symlink_to(root / "studio" / "plugin-data" / "shaderbruecke")
+    seen[name] = {"expand": asyncio.run(shim.expand(target)),
+                  "complete": [item.text for item in asyncio.run(shim.autocomplete("dusk"))]}
+print(json.dumps(seen))
+"""
+
+
+def test_the_provider_answers_from_the_running_profile_only_where_it_is_enabled(tmp_path):
+    """Hermes' own interpreter, config loader and plugin storage, three profiles in one process: the
+    library of the running profile, and nothing where its config leaves the plugin off."""
+    python = _hermes_python()
+    if python is None:
+        pytest.skip("no Hermes interpreter (set HERMES_PYTHON)")
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT.parent), "HOME": str(tmp_path)}
+    done = subprocess.run([str(python), "-c", PROFILE_SCRIPT, str(tmp_path), json.dumps(_doc())],
+                          capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120)
+    assert done.returncode == 0, done.stderr[-2000:]
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    target = _doc()["id"]
+    assert "Shaderbrücke shader" in seen["studio"]["expand"]
+    assert seen["studio"]["complete"] == [f"{target}@v1"]
+    assert seen["empty"] == {"expand": None, "complete": []}
+    assert seen["off"] == {"expand": None, "complete": []}

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 
+from . import tsl_input
 from .header import build_header, effective_sliders, pascal
 
 FORBIDDEN_NAMES = ("iMouse", "iFrame", "iDate", "iTimeDelta", "iChannel")
@@ -90,12 +91,15 @@ _NEGATED_LITERAL_RE = re.compile(r"(^|[\s(,])-\s(\d+(?:\.\d+)?)\.([A-Za-z_$][\w$
 
 
 def guard(record: dict) -> str | None:
-    """Why this shader cannot become a TSL module, or None when it can."""
-    source = record.get("source") or ""
-    if not re.search(r"mainImage\s*\(\s*out\s+\w+\s+fragColor\s*,\s*in\s+\w+\s+fragCoord\s*\)", source):
+    """Why this shader cannot become a TSL module, or None when it can. The checks read what the
+    transpiler will read (`tsl_input.prepare`)."""
+    try:
+        body = tsl_input.prepare(record.get("source") or "")
+    except tsl_input.Refused as refused:
+        return str(refused)
+    if not re.search(r"mainImage\s*\(\s*out\s+\w+\s+fragColor\s*,\s*in\s+\w+\s+fragCoord\s*\)", body):
         return ("the TSL decoder needs `void mainImage(out vec4 fragColor, in vec2 fragCoord)`; "
                 "rename the parameters to fragColor and fragCoord")
-    body = re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.DOTALL)
     for name in FORBIDDEN_NAMES:
         if re.search(rf"\b{re.escape(name)}\b", body):
             return (f"`{name}` has no TSL equivalent in a single-pass Image shader; remove it or use "

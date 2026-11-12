@@ -318,3 +318,26 @@ def test_a_harness_run_writes_nothing_into_the_plugin_folder(tmp_path):
     assert value.get("two") == 2, value
     assert plugin_tree() == before
     assert not (ROOT / "headless" / ".run").exists()
+
+
+@pytest.mark.chromium
+def test_a_page_reads_its_own_folder_and_no_other_local_file(tmp_path):
+    """Catalog review #154066: the proof page runs code an imported shader shaped, so it gets no
+    file:// access; it loads from its own folder over the DevTools pipe and nothing else."""
+    from shaderbruecke import renderer
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "page.html").write_text("<!doctype html><title>p</title>", encoding="utf-8")
+    (site / "own.txt").write_text("own", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    probe = ("(async () => { const read = async url => { try { const r = await fetch(url);"
+             " return r.ok ? await r.text() : 'status ' + r.status } catch (e) { return 'refused' } };"
+             " return { secure: isSecureContext, own: await read('own.txt'),"
+             f" file: await read({secret.as_uri()!r}), etc: await read('file:///etc/hostname'),"
+             " up: await read('/..%2fsecret.txt'), dots: await read('/%2e%2e/secret.txt'),"
+             " other: await read('https://example.com/') } })()")
+    value = renderer.run_page(site / "page.html", probe, timeout_s=30.0)
+    assert value.get("own") == "own" and value.get("secure") is True, value
+    assert [value[k] for k in ("file", "etc", "up", "dots", "other")] == ["refused"] * 5, value

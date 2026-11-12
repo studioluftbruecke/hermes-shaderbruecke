@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <title>Shaderbrücke headless harness</title>
 <!--
-  Offline proof harness. Loaded by renderer.run_page() from file:// with the network blocked
-  (--host-resolver-rules=MAP * ~NOTFOUND); every module comes from ./vendor/three-r187/.
-  The page never fetches anything and writes nothing: it renders frames and returns numbers.
+  Offline proof harness. Loaded by renderer.run_page() under a placeholder https origin whose
+  files the plugin serves from this folder over the DevTools pipe; every other request fails, and
+  the page has no file:// access. Every module comes from ./vendor/three-r187/. The page never
+  fetches anything else and writes nothing: it renders frames and returns numbers.
 
   Public surface (window.sbHarness):
     ready            true once the modules above are imported
@@ -204,8 +205,18 @@ function renderGLSLPixels({ source, sliders = {}, width = 512, height = 288, tim
   }
 }
 
-/** The raw three r187 transpiler output. The rewrites live in exporters/tsl.py (one copy). */
+/**
+ * The raw three r187 transpiler output. The rewrites live in exporters/tsl.py (one copy).
+ * The text is compiled as GLSL first: the encoder copies what it reads into JavaScript, so it only
+ * reads what the GLSL compiler accepted.
+ */
 function transpileRaw({ source, sliders = {} }) {
+  // three reports a failed compile on console.error and still returns a (black) frame.
+  const compiled = renderGLSLPixels({ source, sliders, width: 8, height: 8, time: 0 })
+  if (!compiled.ok || compiled.log) {
+    const errors = compiled.log.split('\n').filter(line => line.includes('ERROR:')).join('\n')
+    return { ok: false, log: `the GLSL compiler refused the source: ${errors || compiled.log}` }
+  }
   try {
     const text = new Transpiler(new ShaderToyDecoder(), new TSLEncoder())
       .parse(sliderDeclarations(sliders) + source)

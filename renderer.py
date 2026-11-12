@@ -8,9 +8,10 @@ process group is killed. Shader code never leaves this machine.
 
 `render()` compiles a shader on `about:blank` with the header/footer below and returns one
 frame. `render_bundle()` renders the three contact-sheet frames, a NaN pass and a one-second
-flash scan in the same browser session. `run_page()` opens a local `file://` page and evaluates
-an expression there, which is how the offline three.js proof harness (`headless/harness.html`)
-runs: the network stays blocked, the page loads its vendored modules from disk.
+flash scan in the same browser session. `run_page()` opens a page from a local folder and
+evaluates an expression there, which is how the offline three.js proof harness
+(`headless/harness.html`) runs: the browser asks this process for every file over the DevTools
+pipe, which answers only from that folder, so the page reads no other local file.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
+from urllib.parse import quote, unquote, urlsplit
 
 # Source string 0 is this header, 1 is the agent's shader, 2 is the footer. The `#line`
 # directives make the driver report errors as `1:<line>` in the agent's own numbering.
@@ -310,6 +313,17 @@ for (const t of CFG.times) {
   drawTimes.push(drawMs);
 }
 
+// Late frames for the motion check only, each compared with the first frame: a shader that drifts
+// a few pixels a minute looks the same at 0, 1 and 2.5 s.
+out.late = [];
+for (const t of CFG.late_times) {
+  setTime(main, t);
+  main.gl.drawArrays(main.gl.TRIANGLES, 0, 3);
+  const px = new Uint8Array(main.w * main.h * 4);
+  main.gl.readPixels(0, 0, main.w, main.h, main.gl.RGBA, main.gl.UNSIGNED_BYTE, px);
+  out.late.push({ t, moved: movedShare(pixelFrames[0], px) });
+}
+
 out.contact_sheet = sheet(pixelFrames, CFG.width, CFG.height, 3, CFG.sheet_cell || 384);
 out.draw_ms = Math.round((drawTimes.reduce((a, b) => a + b, 0) / drawTimes.length) * 10) / 10;
 return { status: out.status };
@@ -393,6 +407,7 @@ class BundleResult:
     compile_log: str = ""
     errors: list[Diagnostic] = field(default_factory=list)
     frames: list[dict] = field(default_factory=list)   # {t, png_path, luma_mean, luma_std, nan_fraction, moved}
+    late: list[dict] = field(default_factory=list)     # {t, moved}: motion-only frames against the first
     contact_sheet: str | None = None
     thumb: str | None = None                            # thumb.webp path (F36)
     flash: dict = field(default_factory=dict)
@@ -588,20 +603,30 @@ class _Pipe:
         self._w, self._r, self._deadline = write_fd, read_fd, deadline
         self._buf = b""
         self._next_id = 0
+        self.on_event: Callable[[dict], None] | None = None
 
-    def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
+    def send(self, method: str, params: dict | None = None, session: str | None = None) -> int:
+        """Write one command without waiting for its reply; returns its id."""
         self._next_id += 1
         msg = {"id": self._next_id, "method": method, "params": params or {}}
         if session:
             msg["sessionId"] = session
-        os.write(self._w, json.dumps(msg).encode() + b"\0")
+        data = memoryview(json.dumps(msg).encode() + b"\0")
+        while data:
+            data = data[os.write(self._w, data):]
+        return self._next_id
+
+    def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
+        call_id = self.send(method, params, session)
         while True:
             reply = self._read_message()
-            if reply.get("id") == self._next_id:
+            if reply.get("id") == call_id:
                 if "error" in reply:
                     raise RuntimeError(f"{method}: {reply['error'].get('message')}")
                 return reply.get("result", {})
-            # Events (Page.loadEventFired and friends) arrive on the same pipe; skip them.
+            # Events arrive on the same pipe. Only `on_event` (the page server) needs any.
+            if "method" in reply and self.on_event is not None:
+                self.on_event(reply)
 
     def _read_message(self) -> dict:
         while b"\0" not in self._buf:
@@ -644,11 +669,10 @@ def _reap(pid: int, grace_s: float) -> int | None:
 class _Child:
     """One short-lived Chromium child: spawn, talk CDP over the pipe, always kill the group."""
 
-    def __init__(self, out_dir: Path, *, timeout_s: float, extra_args: tuple[str, ...] = ()):
+    def __init__(self, out_dir: Path, *, timeout_s: float):
         self.chrome = find_chromium()
         self.out_dir = out_dir
         self.timeout_s = timeout_s
-        self.extra_args = tuple(extra_args)
         self.profile = ""
         self.pid = 0
         self.cdp: _Pipe | None = None
@@ -688,7 +712,6 @@ class _Child:
             # With no proxy configured, this policy leaves WebRTC no UDP path at all (the
             # `--force-` spelling some guides use is not a switch in this Chromium and did nothing).
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-            *self.extra_args,
             f"--user-data-dir={self.profile}", "about:blank",
         ]
         self.started = time.monotonic()
@@ -707,9 +730,12 @@ class _Child:
         self.cdp = _Pipe(cmd_w, res_r, self.started + self.timeout_s)
         return self
 
-    def open(self, url: str) -> str:
+    def open(self, url: str, serve: Callable[[str], tuple[bytes, str] | None] | None = None) -> str:
         """Create a tab, navigate it to `url`, wait for that document to finish loading, return
         the session.
+
+        With `serve` (url -> (body, mime) or None), every request the tab makes is paused and
+        answered by it, or failed when it returns None; nothing reaches the network or the disk.
 
         A target created with a URL still holds the previous (complete) document for a moment, so
         poll for the *expected* URL as well as `readyState === 'complete'`; otherwise the readiness
@@ -719,6 +745,9 @@ class _Child:
             raise RuntimeError("the browser child was not started")
         target = self.cdp.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = self.cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+        if serve is not None:
+            self.cdp.on_event = _page_server_handler(self.cdp, session, serve)
+            self.cdp.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]}, session=session)
         self.cdp.call("Page.enable", {}, session=session)
         self.cdp.call("Page.navigate", {"url": url}, session=session)
         probe = ("JSON.stringify({state: document.readyState, href: location.href, "
@@ -835,6 +864,7 @@ THUMB_NAME = "thumb.webp"
 
 
 def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0, 1.0, 2.5),
+                  late_times: tuple[float, ...] = (10.0, 30.0),
                   width: int = 512, height: int = 288, flash_frames: int = 61,
                   flash_fps: float = 60.0, sheet_cell: int = 384,
                   sliders: list[dict] | None = None, values: dict[str, float] | None = None,
@@ -856,7 +886,8 @@ def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0
     slider_values = {slider["name"]: slider["default"] for slider in (sliders or [])}
     slider_values.update({k: v for k, v in (values or {}).items() if k in slider_values})
     cfg = {"header": header, "footer": FOOTER, "vertex": VERTEX, "source": source,
-           "width": width, "height": height, "times": list(times), "sheet_cell": sheet_cell,
+           "width": width, "height": height, "times": list(times), "late_times": list(late_times),
+           "sheet_cell": sheet_cell,
            "flash_width": 64, "flash_height": 36, "flash_frames": flash_frames, "flash_fps": flash_fps,
            "sliders": slider_values, "thumb_time": THUMB_TIME, "thumb_width": THUMB_SIZE[0],
            "thumb_height": THUMB_SIZE[1], "thumb_quality": THUMB_QUALITY}
@@ -910,6 +941,7 @@ def render_bundle(source: str, out_dir: Path, *, times: tuple[float, ...] = (0.0
         png_path = _write_data_url(frame.pop("png", ""), out_dir / f"frame-t{frame['t']:g}.png")
         frame["png_path"] = png_path
         result.frames.append(frame)
+    result.late = data.get("late") or []
     result.contact_sheet = _write_data_url(data.get("contact_sheet", ""), out_dir / "contact-sheet.png")
     result.thumb = write_webp(data.get("thumb", ""), out_dir / THUMB_NAME)
     result.flash = data.get("flash") or {}
@@ -933,16 +965,60 @@ def render_thumb(source: str, out_dir: Path, *, sliders: list[dict] | None = Non
                          phases=("compile", "thumb"))
 
 
+# The origin a local page is served under. `.invalid` never resolves, so a request the page
+# server misses fails instead of reaching a host; https keeps the page a secure context.
+PAGE_ORIGIN = "https://shaderbruecke.invalid"
+_PAGE_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+               ".mjs": "text/javascript; charset=utf-8", ".json": "application/json",
+               ".png": "image/png"}
+
+
+def page_server(root: Path):
+    """url -> (bytes, mime) for a file under `root` on PAGE_ORIGIN, else None."""
+    root = root.resolve()
+
+    def serve(url: str) -> tuple[bytes, str] | None:
+        parts = urlsplit(url)
+        if f"{parts.scheme}://{parts.netloc}" != PAGE_ORIGIN:
+            return None
+        path = (root / unquote(parts.path).lstrip("/")).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+        return path.read_bytes(), _PAGE_TYPES.get(path.suffix, "application/octet-stream")
+
+    return serve
+
+
+def _page_server_handler(cdp: _Pipe, session: str, serve: Callable[[str], tuple[bytes, str] | None]):
+    def handle(event: dict) -> None:
+        if event.get("method") != "Fetch.requestPaused" or event.get("sessionId") != session:
+            return
+        params = event["params"]
+        found = serve(params["request"]["url"])
+        if found is None:
+            cdp.send("Fetch.failRequest", {"requestId": params["requestId"],
+                                           "errorReason": "BlockedByClient"}, session=session)
+            return
+        body, mime = found
+        cdp.send("Fetch.fulfillRequest", {
+            "requestId": params["requestId"], "responseCode": 200,
+            "responseHeaders": [{"name": "Content-Type", "value": mime}],
+            "body": base64.b64encode(body).decode("ascii")}, session=session)
+
+    return handle
+
+
 def run_page(page: Path | str, expression: str, *, timeout_s: float = 30.0,
              out_dir: Path | None = None, await_promise: bool = True, phase: str = "page") -> dict:
-    """Open a local `file://` page in the headless child and evaluate `expression` there.
+    """Open a page from a local folder in the headless child and evaluate `expression` there.
 
     `expression` may evaluate to a Promise (await_promise=True). The value must be JSON
     serialisable. Returns the value, or ``{"status": "timeout"|"busy"|"no_browser"|
     "browser_error"|"exception", "detail": ...}``; a timeout names its `phase` (`start` while the
-    page loads, then `phase`). The page gets `--allow-file-access-from-files` so its own vendored
-    modules load; the network stays blocked. Without `out_dir` the browser log goes to a temp dir
-    that is removed afterwards, never beside the page.
+    page loads, then `phase`). The page is served under PAGE_ORIGIN from its own folder over the
+    DevTools pipe (`page_server`), so it loads its vendored modules and can read no other local
+    file; every other request fails. Without `out_dir` the browser log goes to a temp dir that is
+    removed afterwards, never beside the page.
     """
     path = Path(page).resolve()
     if not path.is_file():
@@ -954,13 +1030,14 @@ def run_page(page: Path | str, expression: str, *, timeout_s: float = 30.0,
                             await_promise=await_promise, phase=phase)
         finally:
             scratch.cleanup()
-    child = _Child(out_dir, timeout_s=timeout_s, extra_args=("--allow-file-access-from-files",))
+    child = _Child(out_dir, timeout_s=timeout_s)
     started = time.monotonic()
     try:
         with child:
             started = child.started
             try:
-                session = child.open(path.as_uri())
+                session = child.open(f"{PAGE_ORIGIN}/{quote(path.name)}",
+                                     serve=page_server(path.parent))
                 child.phase = phase
                 value = child.evaluate(expression, session=session, await_promise=await_promise)
             except _Deadline:
