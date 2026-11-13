@@ -1,9 +1,9 @@
-"""The render child sends nothing over the network, UDP included (probe 2026-11-08).
+"""The render child sends nothing over the network, UDP included.
 
 `--host-resolver-rules=MAP * ~NOTFOUND` blocks HTTP to host names and IP literals, but page
-JavaScript could still open an RTCPeerConnection and send STUN over UDP: the probe
-(`experiments/shaderbruecke/runs/egress/before.json`) received 5 binding requests on 127.0.0.1 and
-5 on the host's own address. Shaders cannot run JavaScript, so this only matters if an injection
+JavaScript could still open an RTCPeerConnection and send STUN over UDP: without the WebRTC
+policy switch a listener received 5 binding requests on 127.0.0.1 and 5 on the host's own
+address. Shaders cannot run JavaScript, so this only matters if an injection
 ever reached the page script, but the README promises the network is blocked.
 """
 

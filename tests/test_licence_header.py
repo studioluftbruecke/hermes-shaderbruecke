@@ -1,4 +1,4 @@
-"""Every export target writes the version's own licence into its header (constraint 8): after a
+"""Every export target writes the version's own licence into its header: after a
 picker change the latest version exports with the new licence, an earlier version keeps its own,
 and the header shows the shader's current name and the author from the settings."""
 
@@ -49,7 +49,7 @@ def test_after_a_picker_change_only_the_latest_version_exports_the_new_licence(t
     record.ensure_schema(conn)
     record.save(conn, version(1, None))
     record.save(conn, version(2, None))
-    record.set_licence(conn, "20261109-120000-000001-sky", "CC-BY-SA-4.0")
+    record.set_licence(conn, tmp_path / "data", "20261109-120000-000001-sky", "CC-BY-SA-4.0")
     meta = record.get_meta(conn, "20261109-120000-000001-sky")
     latest = exporting.export_view(record.get_version(conn, "20261109-120000-000001-sky", 2), meta)
     earlier = exporting.export_view(record.get_version(conn, "20261109-120000-000001-sky", 1), meta)

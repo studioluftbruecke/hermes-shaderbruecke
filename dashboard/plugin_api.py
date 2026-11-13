@@ -83,7 +83,7 @@ def post_slider_values(shader_id: str, payload: SliderValues, version: int | Non
     """The chat card names the version it plays; the Shaders page names none (the latest)."""
     conn, base = _storage()
     try:
-        answer = _answer(library_api.set_values(conn, shader_id, payload.values, version))
+        answer = _answer(library_api.set_values(conn, base, shader_id, payload.values, version))
         library_api.refresh_thumb(conn, base, _connect, shader_id, version)
         return answer
     finally:
@@ -94,15 +94,15 @@ def post_slider_values(shader_id: str, payload: SliderValues, version: int | Non
 def delete_slider_values(shader_id: str, version: int | None = None) -> dict:
     conn, base = _storage()
     try:
-        answer = _answer(library_api.reset_values(conn, shader_id, version))
+        answer = _answer(library_api.reset_values(conn, base, shader_id, version))
         library_api.refresh_thumb(conn, base, _connect, shader_id, version)
         return answer
     finally:
         conn.close()
 
 
-# ---------------------------------------------------------------- v0.2 library routes
-# Shapes: experiments/shaderbruecke/v02-contract.md (not exported). A refusal answers its status with
+# ---------------------------------------------------------------- library routes
+# The logic and answer shapes are in library_api.py. A refusal answers its status with
 # `{"detail": {"error": <code>, "message": <sentence>, ...}}`.
 
 def _reply(payload: dict) -> dict:

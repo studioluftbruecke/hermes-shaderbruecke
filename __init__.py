@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -17,8 +18,8 @@ from .exporters import registry
 PLUGIN = "shaderbruecke"
 MAX_SOURCE_BYTES = 64 * 1024
 # From the third version of one shader within 15 minutes, the result tells the agent to stop and
-# show it, and a fourth is refused unless keep_iterating=true (F28: one model rendered 11 versions
-# in a 21-minute turn, and the same model ignored the sentence alone).
+# show it, and a fourth is refused unless keep_iterating=true: a sentence alone did not stop a
+# weaker model, which rendered 11 versions in one turn.
 RENDER_BUDGET = 3
 BUDGET_WINDOW_S = 15 * 60
 
@@ -198,8 +199,13 @@ def _numbered(source: str, lines: set[int]) -> str:
 
 def _storage():
     """The profile's database and data directory. Called inside handlers, never at import."""
-    from plugins.plugin_storage import plugin_data_dir, plugin_db
-    return plugin_db(PLUGIN), plugin_data_dir(PLUGIN)
+    from plugins.plugin_storage import plugin_db
+    return plugin_db(PLUGIN), _data_dir()
+
+
+def _data_dir():
+    from plugins.plugin_storage import plugin_data_dir
+    return plugin_data_dir(PLUGIN)
 
 
 def _id_error(field: str, value) -> str:
@@ -230,7 +236,8 @@ def _record_document(shader_id: str, version: int, name: str, source: str, slide
                      author_kind: str = "agent", created_at: str | None = None,
                      provenance: dict | None = None) -> dict:
     """One version. `author_kind` (who wrote the source), `provenance.parent_version` and
-    `provenance.licence` (stamped from the shader's meta, constraint 8) are written once here."""
+    `provenance.licence` (stamped from the shader's meta: the licence picked when the version was
+    made) are written once here."""
     return {
         "id": shader_id,
         "version": version,
@@ -260,8 +267,12 @@ def shader_render(args: dict, **kwargs) -> str:
     name = str(args.get("name") or "shader").strip()[:80]
     try:
         t = float(args.get("time", 1.0))
+    except OverflowError:
+        t = math.inf                         # an integer too large for a float
     except (TypeError, ValueError):
         t = 1.0
+    if not math.isfinite(t):
+        return json.dumps({"success": False, "error": "time must be a finite number of seconds"})
     requested_id = args.get("id")
     requested_id = str(requested_id).strip() if requested_id not in (None, "") else None
     parent_id = args.get("parent_id")
@@ -288,7 +299,7 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
             adopt: dict | None = None, author_kind: str = "agent", provenance: dict | None = None,
             meta_defaults: dict | None = None, expected_base: int | None = None) -> str:
     """One render that becomes a version on success. `adopt` (`{id, created_at}`) re-renders a
-    flat folder of the first builds into its v1 (D14); `author_kind` and `provenance` let the Lab
+    flat folder of the first builds into its v1; `author_kind` and `provenance` let the Lab
     and the importer reuse the same path; `meta_defaults` seeds a new shader's meta (an import's
     inherited licence). `expected_base` (the Lab's save) refuses with `stale_base` when another
     version landed during the render."""
@@ -465,6 +476,7 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
                      "luma_mean": snapshot_frame.get("luma_mean"),
                      "luma_std": snapshot_frame.get("luma_std")},
         "renderer": bundle.renderer,
+        "browser_sandbox": renderer.sandbox_state(),
         "sliders": sliders,
         "tuned_values": {},
         "checks": report,
@@ -537,6 +549,25 @@ def _unadopted_tuning(previous: dict | None, sliders: list[dict]) -> dict[str, f
             if value != authored.get(name) and new_defaults.get(name) != value}
 
 
+def _whole(value) -> int | None:
+    """A version or a limit as an int: a whole number, a finite float or digits as text; else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and math.isfinite(value):
+        value = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    return value if isinstance(value, int) and -2 ** 63 <= value < 2 ** 63 else None
+
+
+def _bad_numbers(args: dict, *keys: str) -> str | None:
+    """The refusal for the first of `keys` that is given but is not a whole number."""
+    for key in keys:
+        if args.get(key) is not None and _whole(args[key]) is None:
+            return f"{key} must be a whole number, got {str(args[key])[:40]!r}"
+    return None
+
+
 def shader_library(args: dict, **kwargs) -> str:
     action = str(args.get("action") or "list").lower()
     if action not in LIBRARY_ACTIONS:
@@ -547,6 +578,11 @@ def shader_library(args: dict, **kwargs) -> str:
             return json.dumps({"success": False, "error": f"id is required for {action}"})
         if not record.valid_id(shader_id):
             return json.dumps({"success": False, "error": _id_error("id", shader_id)})
+    bad = _bad_numbers(args, "version", "limit")
+    if bad:
+        return json.dumps({"success": False, "error": bad})
+    if action == "fork" and args.get("name") is not None and not isinstance(args["name"], str):
+        return json.dumps({"success": False, "error": "name must be text"})
     conn, base = _storage()
     with contextlib.closing(conn):
         return _library(conn, base, action, shader_id, args)
@@ -558,11 +594,8 @@ def _library(conn, base, action: str, shader_id: str, args: dict) -> str:
         return json.dumps(_list(conn, base, args))
 
     if action == "get":
-        version = args.get("version")
-        if isinstance(version, (int, float)):
-            found = record.get_version(conn, shader_id, int(version))
-        else:
-            found = record.latest(conn, shader_id)
+        version = _whole(args.get("version"))
+        found = record.latest(conn, shader_id) if version is None else record.get_version(conn, shader_id, version)
         if found is None:
             return json.dumps({"success": False, "error": f"no shader {shader_id}"
                                                           + (f" version {version}" if version else "")})
@@ -577,9 +610,8 @@ def _library(conn, base, action: str, shader_id: str, args: dict) -> str:
                                     "`@slider` defaults when you write the next version.")})
 
     if action == "play":
-        version = args.get("version")
-        found = (record.get_version(conn, shader_id, int(version)) if isinstance(version, (int, float))
-                 else record.latest(conn, shader_id))
+        version = _whole(args.get("version"))
+        found = record.latest(conn, shader_id) if version is None else record.get_version(conn, shader_id, version)
         if found is None:
             return json.dumps({"success": False, "error": f"no shader {shader_id}"
                                                           + (f" version {version}" if version else "")})
@@ -588,15 +620,13 @@ def _library(conn, base, action: str, shader_id: str, args: dict) -> str:
     if action in ("rename", "tag", "archive", "unarchive"):
         return json.dumps(_organise(conn, shader_id, action, args))
     if action == "set_licence":
-        return json.dumps(_set_licence(conn, shader_id, args.get("licence")))
+        return json.dumps(_set_licence(conn, base, shader_id, args.get("licence")))
     if action == "import":
         return json.dumps(_tool_import(conn, base, args))
     if action == "share":
         return json.dumps(_tool_share(conn, base, shader_id, args))
 
-    version = args.get("version")
-    forked = record.fork(conn, base, shader_id, name=args.get("name"),
-                         version=int(version) if isinstance(version, (int, float)) else None)
+    forked = record.fork(conn, base, shader_id, name=args.get("name"), version=_whole(args.get("version")))
     if forked is None:
         return json.dumps({"success": False, "error": f"no shader {shader_id} to fork"})
     return json.dumps({"success": True, "shader": _without_frag(forked), "parent_id": shader_id})
@@ -664,7 +694,7 @@ def _list(conn, base, args: dict) -> dict:
     params["archived"] = "1" if args.get("archived") is True else ""
     params["starred"] = "1" if args.get("starred") is True else ""
     limit = args.get("limit")
-    params["limit"] = max(1, min(50, int(limit))) if isinstance(limit, (int, float)) else 20
+    params["limit"] = max(1, min(50, _whole(limit))) if _whole(limit) is not None else 20
     page = library_api.library_page(conn, base, params)
     shaders = []
     for row in page["rows"]:
@@ -734,7 +764,7 @@ def _tool_import(conn, base, args: dict) -> dict:
     # the pasted original, not the converted source the frag holds.
     result = {"success": True, **{k: v for k, v in answer.items() if k != "ok"},
               "name": (meta or {}).get("name") or newest.get("name"), "sliders": newest.get("sliders") or [],
-              "tuned_values": record.tuned_values(newest),
+              "tuned_values": record.tuned_values(newest), "checks": newest.get("checks") or {},
               "next": "Tell the user every warning (licence first). Exports and forks of this shader keep its licence."}
     if library.autoplay(newest) and (newest.get("checks") or {}).get("flat") is not True:
         result["media"] = f"MEDIA:{(newest.get('files') or {}).get('frag')}"
@@ -743,8 +773,7 @@ def _tool_import(conn, base, args: dict) -> dict:
 
 
 def _tool_share(conn, base, shader_id: str, args: dict) -> dict:
-    version = args.get("version")
-    answer = share_file(conn, base, shader_id, int(version) if isinstance(version, (int, float)) else None)
+    answer = share_file(conn, base, shader_id, _whole(args.get("version")))
     if not answer:
         return {"success": False, "error": f"no shader {shader_id}"}
     text = json.dumps(answer["share"], indent=1, ensure_ascii=False) + "\n"
@@ -760,15 +789,17 @@ def _tool_share(conn, base, shader_id: str, args: dict) -> dict:
                                            reason=unattended.unattended_reason(_CTX))
         if not decision["ok"]:
             return {**payload, "success": False, "error": decision["error"]}
-        target = Path(str(args["dest_dir"])) / answer["filename"]
-        shutil.copyfile(path, target)
-        payload["copied_to"] = str(target)
+        try:
+            payload["copied_to"] = exporting.write_into(args["dest_dir"], answer["filename"], text.encode("utf-8"),
+                                                        overwrite=bool(args.get("overwrite")))
+        except ValueError as exc:
+            return {**payload, "success": False, "error": str(exc)}
     payload["next"] = ("Anyone with Shaderbrücke imports this file (the Shaderbrücke page, Import, or shader_library import). "
                        "It carries the licence, author and lineage as claims.")
     return payload
 
 
-def _set_licence(conn, shader_id: str, raw) -> dict:
+def _set_licence(conn, base, shader_id: str, raw) -> dict:
     newest = record.latest(conn, shader_id)
     if newest is None:
         return {"success": False, "error": f"no shader {shader_id}"}
@@ -779,7 +810,8 @@ def _set_licence(conn, shader_id: str, raw) -> dict:
         allowed = [option["id"] or "private" for option in library.licence_options(meta) if option["allowed"]]
         return {"success": False, "error": "licence_refused", "message": refusal, "allowed": allowed,
                 "next": "Tell the user why; do not try another licence on your own."}
-    record.set_licence(conn, shader_id, licence)
+    if record.set_licence(conn, base, shader_id, licence) is None:
+        return {"success": False, "error": f"no shader {shader_id}"}
     return {"success": True, "id": shader_id, "licence": licence, "stamped_version": newest["version"],
             "next": (f"v{newest['version']} and every later version carry {licence or 'no licence (private)'}; "
                      "earlier versions keep the licence they were made with, and so do their exports.")}
@@ -789,13 +821,15 @@ def shader_export(args: dict, **kwargs) -> str:
     shader_id = str(args.get("id") or "").strip()
     if shader_id and not record.valid_id(shader_id):
         return json.dumps({"success": False, "error": _id_error("id", shader_id)})
-    version = args.get("version")
+    bad = _bad_numbers(args, "version")
+    if bad:
+        return json.dumps({"success": False, "error": bad})
     conn, base = _storage()
     with contextlib.closing(conn):
         record.ensure_schema(conn)
         payload = exporting.export_shader(
             conn, base, shader_id, str(args.get("target") or "").strip(),
-            version=int(version) if isinstance(version, (int, float)) else None,
+            version=_whole(args.get("version")),
             dest_dir=args.get("dest_dir") or None, overwrite=bool(args.get("overwrite")),
             accept_unproven=bool(args.get("accept_unproven")),
             settings=settings_mod.read_settings(),
@@ -827,7 +861,7 @@ def _render_failure(payload: dict) -> dict:
 
 
 def import_shader(conn, base, payload: dict) -> dict:
-    """F41: import a share file or a pasted Shadertoy, glslCanvas or ISF shader. Nothing is fetched;
+    """Import a share file or a pasted Shadertoy, glslCanvas or ISF shader. Nothing is fetched;
     the source is linted and rendered like the agent's before it lands, the claims (author, url,
     licence, lineage, third party) become provenance, and an NC or SA licence becomes inherited."""
     warnings: list[str] = []
@@ -885,9 +919,8 @@ def import_shader(conn, base, payload: dict) -> dict:
         failure["dialect"] = dialect
         return failure
     if tuned:
-        newest = record.latest(conn, rendered["id"])
-        newest["tuned_values"] = record.tuned_values({**newest, "tuned_values": tuned})
-        record.save(conn, newest)
+        record.rewrite(conn, base, rendered["id"], rendered["version"],
+                       lambda doc: doc.update(tuned_values=record.tuned_values({**doc, "tuned_values": tuned})))
     if rendered.get("warning"):
         warnings.append(rendered["warning"])
     return {"ok": True, "id": rendered["id"], "version": rendered["version"], "dialect": dialect,
@@ -895,7 +928,7 @@ def import_shader(conn, base, payload: dict) -> dict:
 
 
 def share_file(conn, base, shader_id: str, version: int | None = None, settings: dict | None = None) -> dict:
-    """F41: the share file of one version (`<slug>.shaderbruecke.json`, format shaderbruecke/1)."""
+    """The share file of one version (`<slug>.shaderbruecke.json`, format shaderbruecke/1)."""
     doc = record.get_version(conn, shader_id, int(version)) if version else record.latest(conn, shader_id)
     if doc is None:
         return {}
@@ -919,7 +952,7 @@ SHADER_DELETED = "This shader was deleted."
 
 
 def save_human_version(conn, base, shader_id: str, source, base_version) -> dict:
-    """F40: the Lab's Save. The user's source is linted and rendered like the agent's; on success it
+    """The Lab's Save. The user's source is linted and rendered like the agent's; on success it
     becomes the next version with `author_kind: human`, and the agent's next turn is told
     (`pre_llm_call`). A save on an older base answers `stale_base`; with both renderers busy it
     answers `busy` at once instead of waiting inside the request."""
@@ -950,8 +983,11 @@ def save_human_version(conn, base, shader_id: str, source, base_version) -> dict
             return {"refused": 409, "error": "stale_base", "latest": rendered["latest"],
                     "message": str(rendered.get("error"))}
         return _render_failure(rendered)
-    record.add_human_notice(conn, shader_id, rendered["version"])
+    record.add_human_notice(conn, base, shader_id, rendered["version"])
     return {"ok": True, "id": shader_id, "version": rendered["version"], "warning": rendered.get("warning")}
+
+
+_NOTICES_READ: set[str] = set()
 
 
 def on_pre_llm_call(**_kwargs) -> dict | None:
@@ -959,11 +995,18 @@ def on_pre_llm_call(**_kwargs) -> dict | None:
     are per profile (each profile's plugin manager holds its own), so the line comes from the
     running profile's library only."""
     try:
-        conn, _base = _storage()
+        base_dir = _data_dir()
+        # Versions before the marker file stored a Lab save as a database row only, so each data
+        # folder's database is read once per process; after that the marker alone decides.
+        first_read = str(base_dir) not in _NOTICES_READ and (Path(base_dir) / "data.db").exists()
+        _NOTICES_READ.add(str(base_dir))
+        if not first_read and not record.notices_pending(base_dir):
+            return None
+        conn, base = _storage()
     except Exception:
         return None
     with contextlib.closing(conn):
-        notices = record.take_human_notices(conn)
+        notices = record.take_human_notices(conn, base)
         if not notices:
             return None
         parts = [f'"{record.display_name(record.get_meta(conn, n["id"])["name"])}" (now v{n["version"]}, id {n["id"]})'
@@ -1052,7 +1095,7 @@ def register(ctx) -> None:
         ctx.register_cli_command(name="shaderbruecke", help="Shaderbrücke library maintenance",
                                  setup_fn=_cli_setup, handler_fn=_cli,
                                  description="thumbs: backfill thumbnails; adopt: adopt old flat folders")
-    # `@shader:` (F39). The provider checks the running profile on every call, so it is registered
+    # `@shader:` references. The provider checks the running profile on every call, so it is registered
     # once per process and later loads (other profiles, reloads) are refused harmlessly.
     shim = references.make_shim()
     if shim is not None and hasattr(ctx, "register_context_reference"):

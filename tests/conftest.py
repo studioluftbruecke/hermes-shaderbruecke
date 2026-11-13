@@ -7,6 +7,7 @@ proof is not a passed proof, so the PR says which host ran the marked tests.
 import importlib.util
 import pathlib
 import sys
+import types
 
 import pytest
 
@@ -44,3 +45,10 @@ def attended_session(monkeypatch):
     for name in ("HERMES_CRON_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_SINGLE_QUERY_SESSION",
                  "HERMES_PLUGIN_HOST_PROCESS"):
         monkeypatch.delenv(name, raising=False)
+    # Hermes' finite-turn marker answers "not finite", also where Hermes is not importable (an
+    # unreadable marker counts as unattended). tests/test_rr_attendance.py covers the other answers.
+    finite = types.ModuleType("gateway.session_finite")
+    finite.finite_turn_required = lambda: False
+    if importlib.util.find_spec("gateway") is None:
+        monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_finite", finite)

@@ -1,14 +1,19 @@
 """Does this turn run without a human? The plugin's own copy of Hermes' unattended rule.
 
-`tools/approval_context.py` is not a public import, so the rule is restated here and kept to the
-signals Hermes itself uses: a cron session, a programmatic gateway platform, or a single query run
-(`hermes chat -q` / `-z`). A human is never asked to approve anything at that point, so an action
-that needs a person must refuse instead of hanging.
+`tools/approval_context.py` is not a public import, so the rule is restated here with the signals
+Hermes itself uses. A turn is unattended when:
 
-Under `plugins.isolation: host` the tools run in a separate plugin host, where the session
-variables and the environment are the host's own, not the calling turn's. There the rule reads what
-Hermes forwards through `ctx` (`current_cron_execution()`, `session_surface()`), and on a CLI
-surface, where a one-shot run cannot be told from a chat, it fails closed (Coolify Cockpit's B1).
+- it is a cron run (`ctx.current_cron_execution()` or `HERMES_CRON_SESSION`);
+- the session platform is `webhook`, `msgraph_webhook` or `api_server`;
+- it is a single query (`HERMES_SINGLE_QUERY_SESSION`, or Hermes' finite-turn marker for a
+  `hermes chat -q` / `-z` turn the gateway admitted);
+- inside the plugin host (`HERMES_PLUGIN_HOST_PROCESS=1`, `plugins.isolation: host`), the
+  forwarded surface is one a one-shot run uses (empty, `cli`, `oneshot`): the host's own
+  environment cannot tell such a run from a chat, so it fails closed.
+
+When the finite-turn marker cannot be read, nobody can say whether a person is present, and the
+turn counts as unattended too (`UNKNOWN`). A human is never asked to approve anything in an
+unattended turn, so an action that needs a person refuses instead of hanging.
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # Surfaces where a one-shot `hermes -z` / `chat -q` turn can run.
 _HOST_BLIND_SURFACES = frozenset({"", "cli", "oneshot"})
 HOST_PROCESS_ENV = "HERMES_PLUGIN_HOST_PROCESS"
+UNKNOWN = "unknown"
+UNKNOWN_REFUSAL = ("this Hermes version does not say whether a person is present, so writes are refused; "
+                   "update the plugin")
 
 
 def _session_env(name: str) -> str:
@@ -34,13 +42,14 @@ def _session_env(name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _finite_turn() -> bool:
-    """Hermes marks `chat -q` / `-z` turns as finite; readable in-process only."""
+def _finite_turn() -> bool | None:
+    """Hermes marks `chat -q` / `-z` turns as finite; None when the marker cannot be read."""
     try:
+        # Private on purpose: Hermes 0.23.1 has no public signal for a gateway-admitted -q/-z turn.
         from gateway.session_finite import finite_turn_required
         return finite_turn_required() is True
     except Exception:
-        return False
+        return None
 
 
 def _ctx_call(ctx, name: str):
@@ -58,7 +67,12 @@ def unattended_reason(ctx=None) -> str | None:
     platform = str(_ctx_call(ctx, "session_surface") or _session_env("HERMES_SESSION_PLATFORM")).strip().lower()
     if platform in _UNATTENDED_PLATFORMS:
         return platform
-    if _finite_turn() or _session_env("HERMES_SINGLE_QUERY_SESSION").strip().lower() in _TRUTHY:
+    if _session_env("HERMES_SINGLE_QUERY_SESSION").strip().lower() in _TRUTHY:
+        return "single-query"
+    finite = _finite_turn()
+    if finite is None:
+        return UNKNOWN
+    if finite:
         return "single-query"
     if os.environ.get(HOST_PROCESS_ENV, "").strip().lower() in _TRUTHY and platform in _HOST_BLIND_SURFACES:
         return "plugin-host"

@@ -14,11 +14,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
+import stat
 from pathlib import Path
 
-from . import record, renderer
+from . import record, renderer, unattended
 from . import settings as settings_mod
 from .exporters import registry, tsl, tsl_input
 from .exporters.header import licence_text, pascal
@@ -26,6 +28,8 @@ from .exporters.header import licence_text, pascal
 PROOF_MEAN_LIMIT = 2.0     # 2/255
 PROOF_P99_LIMIT = 8.0      # 8/255
 PROOF_FILE = "proof.json"
+# Targets whose files use slider names as JavaScript identifiers (props, constants).
+JS_IDENTIFIER_TARGETS = frozenset({"r3f", "tsl"})
 HARNESS = Path(__file__).with_name("headless") / "harness.html"
 
 
@@ -39,6 +43,8 @@ def dest_decision(dest, filenames, *, overwrite: bool = False, allow_writes: boo
     so the refusal cases are unit tested.
     """
     if reason and not allow_writes:
+        if reason == unattended.UNKNOWN:
+            return {"ok": False, "error": unattended.UNKNOWN_REFUSAL}
         return {"ok": False, "error": (f"dest_dir is refused in an unattended run ({reason}) unless "
                                        "allow_project_writes is on")}
     if not dest:
@@ -48,11 +54,51 @@ def dest_decision(dest, filenames, *, overwrite: bool = False, allow_writes: boo
         return {"ok": False, "error": "dest_dir must be an absolute path"}
     if not path.is_dir():
         return {"ok": False, "error": f"dest_dir {path} does not exist or is not a directory"}
-    clashes = [name for name in filenames if (path / name).exists()]
+    links = [name for name in filenames if (path / name).is_symlink()]
+    if links:
+        return {"ok": False, "error": f"dest_dir has a symlink named {', '.join(links)}; "
+                                      "remove it first (a write never follows a link)"}
+    clashes = [name for name in filenames if os.path.lexists(path / name)]
     if clashes and not overwrite:
         return {"ok": False, "error": f"dest_dir already has {', '.join(clashes)}; "
                                       "pass overwrite=true to replace"}
     return {"ok": True, "error": None, "clashes": clashes}
+
+
+def write_into(dest, filename: str, data: bytes, *, overwrite: bool = False) -> str:
+    """Write `data` as `dest/filename` without following a link out of `dest`; returns the path.
+
+    The target is created exclusively with `O_NOFOLLOW`, so a symlink planted after
+    `dest_decision` ran is refused, not followed. With `overwrite`, an existing regular file is
+    unlinked first, so a hard link to a file elsewhere is replaced instead of written through.
+    Raises `ValueError` with a sentence for the user on every refusal.
+    """
+    folder = Path(str(dest))
+    if Path(filename).name != filename or filename in {"", ".", ".."}:
+        raise ValueError(f"{filename!r} is not a plain file name")
+    target = folder / filename
+    try:
+        found = os.lstat(target)
+    except FileNotFoundError:
+        found = None
+    if found is not None:
+        if stat.S_ISLNK(found.st_mode):
+            raise ValueError(f"{target} is a symlink; remove it first (a write never follows a link)")
+        if not stat.S_ISREG(found.st_mode):
+            raise ValueError(f"{target} exists and is not a regular file")
+        if not overwrite:
+            raise ValueError(f"{target} already exists; pass overwrite=true to replace")
+        os.unlink(target)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(target, flags, 0o644)
+    except FileExistsError as exc:
+        raise ValueError(f"{target} appeared while writing; nothing was replaced") from exc
+    except OSError as exc:
+        raise ValueError(f"{target} could not be written: {exc.strerror}") from exc
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return str(target)
 
 
 # --- the harness ---------------------------------------------------------------------------------
@@ -293,7 +339,7 @@ def prove(document: dict, target_row, files: dict[str, str], out_dir: Path) -> d
         proven = prove_three(document, files, out_dir)
         if target_row.id == "r3f":
             proven["why"] = (proven.get("why") or "") + \
-                "; the .tsx wrapper itself is proven by the app render (E2), not by the harness"
+                "; the proof renders the material module, the .tsx wrapper around it is not rendered"
         return proven
     return _not_proven(target_row.proof, f"no proof runner for {target_row.proof}")
 
@@ -373,7 +419,7 @@ def _finish_handoff(document: dict, target_row, files: dict[str, str], options: 
 def export_view(document: dict, meta: dict | None, settings: dict | None = None) -> dict:
     """The version as every exporter sees it: the shader's current name (a rename applies to the
     next export; the record keeps the name it was made with) and, for the user's own shaders, the
-    author from the settings. The licence stays the version's own stamp (constraint 8)."""
+    author from the settings. The licence stays the version's own stamp, the one picked when it was made."""
     view = dict(document)
     if meta and meta.get("name"):
         view["name"] = meta["name"]
@@ -432,6 +478,13 @@ def _export(conn: sqlite3.Connection, base: Path, shader_id: str, target: str, *
     number: int = int(document["version"])
     name = pascal(document.get("name"))
     base_payload = {"id": shader_id, "version": number, "target": target}
+
+    # A version stored before JavaScript reserved words were refused as slider names.
+    unusable = [s["name"] for s in document.get("sliders") or [] if s["name"] in record.JS_RESERVED]
+    if target in JS_IDENTIFIER_TARGETS and unusable:
+        return _failure(f"the slider name `{unusable[0]}` is a JavaScript reserved word, so the {target_row.label} "
+                        "files could not load; rename the slider and render again", **base_payload,
+                        next="Rename the slider in the source, render a new version, then export that.")
 
     # A bad dest_dir is refused before anything is rendered: the proof is the slow part.
     if dest_dir:
@@ -497,9 +550,13 @@ def _export(conn: sqlite3.Connection, base: Path, shader_id: str, target: str, *
                 return _failure(decision["error"], **base_payload, files=written, proof=proof,
                                 next="Fix dest_dir, or copy the files from the exports folder yourself.")
             for filename in outputs:
-                target_path = Path(str(dest_dir)) / filename
-                shutil.copyfile(out_dir / filename, target_path)
-                payload["copied_to"].append(str(target_path))
+                try:
+                    payload["copied_to"].append(write_into(dest_dir, filename, (out_dir / filename).read_bytes(),
+                                                           overwrite=overwrite))
+                except ValueError as exc:
+                    return _failure(str(exc), **base_payload, files=written, proof=proof,
+                                    copied_to=payload["copied_to"],
+                                    next="Fix dest_dir, or copy the files from the exports folder yourself.")
             if verdict != "match":
                 payload["copied_unproven"] = True
                 payload["warning"] = (f"copied into dest_dir although the proof says {verdict}: "

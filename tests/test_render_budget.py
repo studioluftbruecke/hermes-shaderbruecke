@@ -1,6 +1,6 @@
-"""F28: a render budget the agent sees in the tool result (full test, 2026-11-08).
+"""A render budget the agent sees in the tool result.
 
-For "make it and show it" DeepSeek v4.1 Flash rendered 11 versions of one shader in a 21-minute
+For "make it and show it" one model rendered 11 versions of one shader in a 21-minute
 turn; the skill said "fix and render again until the checks and your eyes agree" with no stop.
 The skill now sets a budget of three renders per request, and because a model can skip a skill,
 `shader_render` itself says so from the third version made within 15 minutes.
@@ -50,7 +50,7 @@ def test_the_third_version_in_a_row_tells_the_agent_to_stop(tmp_path, monkeypatc
 
 
 def test_a_fourth_version_within_the_window_is_refused_before_the_browser(tmp_path, monkeypatch):
-    # The live box (runs/f28-budget) showed DeepSeek ignore "Stop here" at v3, v4 and v5, so the
+    # A live turn showed a model ignore "Stop here" at v3, v4 and v5, so the
     # budget is enforced: no browser starts, and the refusal hands back the latest version to show.
     db = tmp_path / "data.db"
     base = tmp_path / "data"

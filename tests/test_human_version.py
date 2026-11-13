@@ -1,4 +1,4 @@
-"""The Lab's Save (F40): a human version through the same lint and render as the agent's, the
+"""The Lab's Save: a human version through the same lint and render as the agent's, the
 stale-base and busy refusals, an inline compile error that makes no version, and the one line
 the agent's next turn gets (`pre_llm_call`). The render is faked; no browser, no Hermes."""
 
@@ -42,6 +42,7 @@ def lib(tmp_path, monkeypatch):
 
     monkeypatch.setattr(shaderbruecke, "render_version", fake_render_version)
     monkeypatch.setattr(shaderbruecke, "_storage", lambda: (sqlite3.connect(path), tmp_path))
+    monkeypatch.setattr(shaderbruecke, "_data_dir", lambda: tmp_path)
     monkeypatch.setattr(renderer, "free_slots", lambda directory: 2)
     yield conn, tmp_path, calls
     conn.close()

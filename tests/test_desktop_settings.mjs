@@ -5,8 +5,7 @@
 // The three imports (@hermes/plugin-sdk, react, react/jsx-runtime) are replaced by stand-ins, as in
 // test_desktop_card.mjs. `register(ctx)` runs against a fake ctx whose `register` replaces an entry
 // by id and whose disposers remove by id, like Desktop's registry. It proves what the plugin
-// registers and renders; Desktop's own Settings and sidebar code are proven in
-// experiments/sidebar-rows/ (M0 probe), and the look in the page harness.
+// registers and renders, not Desktop's own Settings and sidebar code or the page's look.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -108,7 +107,7 @@ const { plugin } = probe
 const label = JSON.parse(fs.readFileSync(path.join(ROOT, 'dashboard', 'manifest.json'), 'utf8')).label
 const slug = /^name:\s*(\S+)/m.exec(fs.readFileSync(path.join(ROOT, 'plugin.yaml'), 'utf8'))[1]
 
-check('one settings page, titled with the brand (D7: no entry under the slug)', () => {
+check('one settings page, titled with the brand (no entry under the slug)', () => {
   const ctx = fakeCtx()
   plugin.register(ctx)
   equal(ctx.pages.map(p => [p.id, p.title, p.icon, typeof p.render]), [['settings', label, 'symbol-color', 'function']], 'pages')

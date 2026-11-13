@@ -24,7 +24,17 @@ from pathlib import Path
 
 MAX_SLIDERS = 16
 
-# Names the renderer injects, GLSL keywords, and the builtins a slider must not shadow.
+# JavaScript reserved words. GLSL accepts most of them as names, but the R3F component
+# destructures slider names and the TSL module declares them as constants, so neither would parse.
+JS_RESERVED = frozenset("""
+await break case catch class const continue debugger default delete do else enum export extends
+false finally for function if import in instanceof new null return super switch this throw true try
+typeof var void while with yield let static implements interface package private protected public
+eval arguments undefined NaN Infinity
+""".split())
+
+# Names a slider must not take: those the renderer injects, GLSL keywords, the builtins a slider
+# would shadow, and the JavaScript reserved words above.
 RESERVED = frozenset("""
 iTime iResolution iMouse iFrame iDate iTimeDelta fragColor fragCoord main mainImage sb_FragColor
 void bool int uint float double vec2 vec3 vec4 ivec2 ivec3 ivec4 bvec2 bvec3 bvec4 mat2 mat3 mat4
@@ -33,7 +43,7 @@ return if else for while do break continue discard struct switch case default tr
 texture textureLod texture2D texelFetch smoothstep mix clamp step length distance normalize dot
 cross sin cos tan asin acos atan pow exp log exp2 log2 sqrt inversesqrt abs sign floor ceil fract
 mod min max round trunc fwidth dFdx dFdy
-""".split())
+""".split()) | JS_RESERVED
 
 _SLIDER_RE = re.compile(
     r"^\s*//\s*@slider\s+(?P<name>[A-Za-z_]\w*)\s+(?P<min>-?\d+(?:\.\d+)?)\s*\.\.\s*"
@@ -84,12 +94,22 @@ def slider_values(sliders: list[dict]) -> dict[str, float]:
     return {slider["name"]: slider["default"] for slider in sliders}
 
 
-def _clamped(slider: dict, value) -> float | None:
-    """`value` as a float inside the slider's range, or None when it is not a finite number."""
+def finite(value) -> float | None:
+    """`value` as a finite float, or None for a non-number, NaN, an infinity or an integer too
+    large for a float (JSON and Python both allow one)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
-    if not math.isfinite(number):
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _clamped(slider: dict, value) -> float | None:
+    """`value` as a float inside the slider's range, or None when it is not a finite number."""
+    number = finite(value)
+    if number is None:
         return None
     return min(float(slider["max"]), max(float(slider["min"]), number))
 
@@ -164,6 +184,16 @@ def save(conn: sqlite3.Connection, record: dict) -> dict:
     return record
 
 
+def update(conn: sqlite3.Connection, record: dict) -> bool:
+    """Replace an existing version row; False when the row is gone (a delete won), so a writer
+    that read the version earlier never stores it again."""
+    ensure_schema(conn)
+    cursor = conn.execute("UPDATE shaders SET record = ? WHERE id = ? AND version = ?",
+                          (json.dumps(record), record["id"], int(record["version"])))
+    conn.commit()
+    return cursor.rowcount == 1
+
+
 def insert(conn: sqlite3.Connection, record: dict) -> dict:
     """A new version. Unlike `save` it never replaces a row: a second writer that got the same
     number raises instead of overwriting (callers number versions inside `shader_lock`)."""
@@ -176,8 +206,9 @@ def insert(conn: sqlite3.Connection, record: dict) -> dict:
 
 @contextlib.contextmanager
 def shader_lock(base: Path, shader_id: str):
-    """Serialise numbering and storing a new version of one shader across threads and processes
-    (an agent turn, a Lab save, a job). The render itself runs outside the lock."""
+    """Serialise writes to one shader across threads and processes (an agent turn, a Lab save, a
+    slider save, a job, a delete): numbering a new version, and every read-modify-write of a
+    stored version. The render itself runs outside the lock."""
     shader_dir(base, shader_id)               # validates the id
     folder = Path(base) / "locks"
     folder.mkdir(parents=True, exist_ok=True)
@@ -411,39 +442,51 @@ def fork(conn: sqlite3.Connection, base: Path, shader_id: str, name: str | None 
     return save(conn, record)
 
 
-def set_slider_values(conn: sqlite3.Connection, shader_id: str, values: dict[str, float],
+def set_slider_values(conn: sqlite3.Connection, base: Path, shader_id: str, values: dict[str, float],
                       version: int | None = None) -> dict | None:
     """Merge the human's slider values into `tuned_values` of one version (default: the latest).
 
     Only names the record declares are kept, only finite numbers, clamped to the slider's range.
-    `slider_values` mirrors the result for readers written before `tuned_values` existed.
+    `slider_values` mirrors the result for readers written before `tuned_values` existed. Read and
+    written under the shader's lock; None when the version does not exist (or was just deleted).
     """
-    record = latest(conn, shader_id) if version is None else get_version(conn, shader_id, version)
-    if record is None:
-        return None
-    sliders = {slider["name"]: slider for slider in record.get("sliders") or []}
-    merged = tuned_values(record)
-    for name, value in (values or {}).items():
-        if name in sliders:
-            number = _clamped(sliders[name], value)
-            if number is not None:
-                merged[name] = number
-    record["tuned_values"] = merged
-    record["slider_values"] = dict(merged)
-    record["edited_by"] = "human"
-    return save(conn, record)
+    def change(record: dict) -> None:
+        sliders = {slider["name"]: slider for slider in record.get("sliders") or []}
+        merged = tuned_values(record)
+        for name, value in (values or {}).items():
+            if name in sliders:
+                number = _clamped(sliders[name], value)
+                if number is not None:
+                    merged[name] = number
+        record["tuned_values"] = merged
+        record["slider_values"] = dict(merged)
+        record["edited_by"] = "human"
+
+    return rewrite(conn, base, shader_id, version, change)
 
 
-def reset_tuned_values(conn: sqlite3.Connection, shader_id: str, version: int | None = None) -> dict | None:
+def reset_tuned_values(conn: sqlite3.Connection, base: Path, shader_id: str,
+                       version: int | None = None) -> dict | None:
     """Forget the human's values on one version (default: the latest): every slider is back at its
-    default."""
-    record = latest(conn, shader_id) if version is None else get_version(conn, shader_id, version)
-    if record is None:
-        return None
-    record["tuned_values"] = {}
-    record["slider_values"] = {}
-    record["edited_by"] = "human"
-    return save(conn, record)
+    default. None when the version does not exist (or was just deleted)."""
+    def change(record: dict) -> None:
+        record["tuned_values"] = {}
+        record["slider_values"] = {}
+        record["edited_by"] = "human"
+
+    return rewrite(conn, base, shader_id, version, change)
+
+
+def rewrite(conn: sqlite3.Connection, base: Path, shader_id: str, version: int | None, change) -> dict | None:
+    """Read one version (default: the latest) under the shader's lock, apply `change`, store it.
+
+    Returns the stored record, or None when the version is missing or a delete removed it."""
+    with shader_lock(base, shader_id):
+        record = latest(conn, shader_id) if version is None else get_version(conn, shader_id, version)
+        if record is None:
+            return None
+        change(record)
+        return record if update(conn, record) else None
 
 
 # ---------------------------------------------------------------- v0.2: authorship, meta, licences
@@ -509,18 +552,24 @@ def update_meta(conn: sqlite3.Connection, shader_id: str, **changes) -> dict:
     return save_meta(conn, meta)
 
 
-def set_licence(conn: sqlite3.Connection, shader_id: str, licence: str | None) -> dict | None:
-    """Constraint 8: the picker's value becomes the default for new versions and is re-stamped on
-    the latest version; earlier versions keep the licence they were made with. The caller checks
-    the licence rules (`library.licence_change_refusal`) first."""
-    newest = latest(conn, shader_id)
-    if newest is None:
-        return None
-    provenance = dict(newest.get("provenance") or {})
-    provenance["licence"] = licence
-    newest["provenance"] = provenance
-    save(conn, newest)
-    return update_meta(conn, shader_id, licence=licence)
+def set_licence(conn: sqlite3.Connection, base: Path, shader_id: str, licence: str | None) -> dict | None:
+    """The picker's value becomes the default for new versions and is re-stamped on the latest
+    version; earlier versions keep the licence they were made with. The caller checks the licence
+    rules (`library.licence_change_refusal`) first.
+
+    Under the shader's lock, so a render that numbers the next version meanwhile reads the new
+    licence, and a delete that lands meanwhile is not undone. None when the shader is gone."""
+    def stamp(record: dict) -> None:
+        record["provenance"] = {**(record.get("provenance") or {}), "licence": licence}
+
+    with shader_lock(base, shader_id):
+        newest = latest(conn, shader_id)
+        if newest is None:
+            return None
+        stamp(newest)
+        if not update(conn, newest):
+            return None
+        return update_meta(conn, shader_id, licence=licence)
 
 
 def thumb_stat(doc: dict) -> tuple[str, int] | None:
@@ -562,7 +611,7 @@ def shader_ids(conn: sqlite3.Connection) -> list[str]:
     return [row[0] for row in conn.execute("SELECT DISTINCT id FROM shaders")]
 
 
-# ---------------------------------------------------------------- v0.2: flat folders (D14)
+# ---------------------------------------------------------------- flat folders of the first builds
 
 _LEGACY_ID_RE = re.compile(r"^(?P<date>\d{8})-(?P<time>\d{6})-\d{6}-(?P<slug>[a-z0-9-]+)$")
 
@@ -616,17 +665,31 @@ def delete(conn: sqlite3.Connection, base: Path, shader_id: str) -> None:
         shutil.rmtree(_scratch_root(base, shader_id), ignore_errors=True)
 
 
-# ---------------------------------------------------------------- v0.2: Lab saves reach the agent (F40)
+# ---------------------------------------------------------------- Lab saves reach the agent
 
-def add_human_notice(conn: sqlite3.Connection, shader_id: str, version: int) -> None:
+# A file beside the database that exists while a Lab save waits to be told to the agent, so the
+# hook that runs before every LLM call checks one path instead of opening the database.
+NOTICE_MARKER = "lab-saves-pending"
+
+
+def notices_pending(base: Path) -> bool:
+    return (Path(base) / NOTICE_MARKER).exists()
+
+
+def add_human_notice(conn: sqlite3.Connection, base: Path, shader_id: str, version: int) -> None:
     ensure_schema(conn)
     conn.execute("INSERT OR IGNORE INTO human_notices (id, version, created_at, delivered_at) VALUES (?, ?, ?, NULL)",
                  (shader_id, int(version), now_iso()))
     conn.commit()
+    Path(base).mkdir(parents=True, exist_ok=True)
+    (Path(base) / NOTICE_MARKER).touch()
 
 
-def take_human_notices(conn: sqlite3.Connection) -> list[dict]:
-    """The Lab saves the agent has not been told about, newest version per shader; marked as told."""
+def take_human_notices(conn: sqlite3.Connection, base: Path) -> list[dict]:
+    """The Lab saves the agent has not been told about, newest version per shader; marked as told.
+
+    The marker goes first: a save that lands meanwhile sets it again and is told next time."""
+    (Path(base) / NOTICE_MARKER).unlink(missing_ok=True)
     ensure_schema(conn)
     taken = conn.execute("UPDATE human_notices SET delivered_at = ? WHERE delivered_at IS NULL "
                          "RETURNING id, version, created_at", (now_iso(),)).fetchall()

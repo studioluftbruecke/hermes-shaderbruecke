@@ -1,6 +1,6 @@
 name: shaderbruecke
-version: "0.2.4"
-description: "Shaderbrücke: make, check, tune and export GLSL shaders with your Hermes agent. The agent writes the shader, a headless Chromium on the host lints, compiles and renders it, the agent looks at its own frames and fixes them, Desktop plays the result live with sliders and keeps every shader on the Shaderbrücke page (versions, forks, licences, a Lab editor, share files and import), and the exports (three.js, R3F, TSL, Shadertoy, agent handoff, and experimental TouchDesigner and ISF) carry a frame-by-frame proof."
+version: "0.2.5"
+description: "Make, check, tune and export GLSL shaders with your Hermes agent: a headless Chromium renders every frame, Desktop plays them live with sliders, and every export carries a proof."
 author: "Studio Luftbrücke"
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -14,24 +14,30 @@ config_schema:
   allow_project_writes:
     type: boolean
     default: false
-    description: "Allow shader_export to copy files into dest_dir during unattended runs (cron, webhook, single query)."
+    label: "Project writes in unattended runs"
+    description: "Allow shader_export and share to write into dest_dir during unattended runs (cron, webhook, single query)."
   credit_line:
     type: boolean
     default: true
-    description: "Append the 'Made with Shaderbruecke' line to every export header."
+    label: "Credit line in exports"
+    description: "Append the 'Made with Shaderbrücke' line to every export header."
   keep_versions:
     type: int
     default: 5
+    label: "Versions with frames"
     description: "Keep frames and proof images for the newest N versions of each shader; older versions keep their source, record and export files."
   author_name:
     type: string
     default: ""
+    label: "Author name"
     description: "Your name as it appears in export headers and share files (empty: none)."
   author_url:
     type: string
     default: ""
-    description: "A link that goes with your name in export headers and share files (https://...)."
+    label: "Author link"
+    description: "A link that goes with your name in export headers and share files (http:// or https://)."
   starter_prompt:
     type: boolean
     default: true
-    description: "Start new shader chats with an example prompt"
+    label: "Example prompt in new chats"
+    description: "Start new shader chats from the Shaderbrücke page with one of the example prompts."

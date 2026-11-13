@@ -1,5 +1,6 @@
-"""The v0.2 library routes end to end through FastAPI against a temp library: the contract's shapes
-(`experiments/shaderbruecke/v02-contract.md`), refusals with their codes, and D17's delete rule."""
+"""The library routes end to end through FastAPI against a temp library: the answer shapes Desktop
+reads, refusals with their codes, and the delete rule (a person types the name; the agent has no
+delete)."""
 
 import pathlib
 import sqlite3
@@ -139,7 +140,7 @@ def _pending_notices(tmp_path):
 
 def _notice(tmp_path, shader_id, version):
     conn = sqlite3.connect(tmp_path / "data" / "data.db")
-    record.add_human_notice(conn, shader_id, version)
+    record.add_human_notice(conn, tmp_path / "data", shader_id, version)
     conn.close()
 
 

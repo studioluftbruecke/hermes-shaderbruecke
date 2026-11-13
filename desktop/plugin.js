@@ -55,7 +55,10 @@ const SLIDER_RESERVED = new Set(('iTime iResolution iMouse iFrame iDate iTimeDel
   'return if else for while do break continue discard struct switch case default true false ' +
   'texture textureLod texture2D texelFetch smoothstep mix clamp step length distance normalize dot ' +
   'cross sin cos tan asin acos atan pow exp log exp2 log2 sqrt inversesqrt abs sign floor ceil fract ' +
-  'mod min max round trunc fwidth dFdx dFdy').split(' '))
+  'mod min max round trunc fwidth dFdx dFdy ' +
+  'await break catch class continue debugger delete enum export extends finally function import ' +
+  'instanceof new null super this throw try typeof var with yield let static implements interface ' +
+  'package private protected public eval arguments undefined NaN Infinity').split(' '))
 const MAX_SLIDERS = 16
 
 // The same table as lint_rules.json; tests/test_lint_rules_in_desktop.py fails when they differ.
@@ -337,8 +340,19 @@ function cardMeta(toolName, args, result) {
     name: argsName || (typeof meta.name === 'string' ? meta.name : ''),
     sliders: Array.isArray(meta.sliders) && meta.sliders.length ? meta.sliders : parseSliders(argsSource),
     tunedValues: meta.tuned_values || meta.slider_values || null,
-    argsSource
+    argsSource,
+    // Like the page and the Lab: only a version whose flash check found nothing plays by itself.
+    autoplay: flashVerdict(meta.checks) === 'none'
   }
+}
+
+/** The flash verdict in a result's `checks` (`{flash: {verdict}}` or `{flash: 'none'}`), or null. */
+function flashVerdict(checks) {
+  const flash = checks && typeof checks === 'object' ? checks.flash : null
+  if (typeof flash === 'string') {
+    return flash
+  }
+  return flash && typeof flash.verdict === 'string' ? flash.verdict : null
 }
 
 /** Parse `@slider` annotations into {name, min, max, default, step, label}, like record.parse_sliders. */
@@ -407,7 +421,7 @@ function prefersReducedMotion() {
 }
 
 /**
- * ShaderPlayer (P20): the one WebGL2 player behind the chat card, the Shaders page's hover canvas,
+ * ShaderPlayer: the one WebGL2 player behind the chat card, the Shaders page's hover canvas,
  * the detail sheet and the Lab. Framework-free on purpose: React only wraps it.
  *
  * Compile `source` and draw it. The loop runs only while the caller wants motion and the canvas
@@ -1054,7 +1068,7 @@ function SliderRow({ slider, value, onChange, onBlur, onReset }) {
         htmlFor: id,
         className: 'sb-label',
         'data-tuned': tuned ? 'true' : 'false',
-        title: `${label} (${slider.name}). Double-click to reset to ${Number(slider.default).toFixed(decimals)}.`,
+        title: `${label} (${slider.name}). Double-click, or press Delete on the slider, to reset to ${Number(slider.default).toFixed(decimals)}.`,
         onDoubleClick: onReset,
         children: label
       }),
@@ -1069,6 +1083,14 @@ function SliderRow({ slider, value, onChange, onBlur, onReset }) {
         'aria-valuetext': shown,
         style: { '--fill': `${fill}%` },
         onChange: event => onChange(slider.name, Number(event.target.value)),
+        // The keyboard's way to reset one slider (the label's double-click needs a pointer).
+        onKeyDown: event => {
+          if (event.key === 'Delete' || event.key === 'Backspace') {
+            event.preventDefault()
+            onReset()
+          }
+        },
+        'aria-keyshortcuts': 'Delete',
         onBlur
       }),
       jsx('output', { htmlFor: id, className: 'sb-val', children: shown })
@@ -1363,7 +1385,9 @@ function ShaderCanvas({ file, toolName, args, result, fallback, sessionId }) {
 
       dispatch(action)
     }
-    const control = createShaderPlayer(canvasRef.current, { source, sliders, values: valuesRef.current, onState, onTime })
+    const control = createShaderPlayer(canvasRef.current, {
+      source, sliders, values: valuesRef.current, onState, onTime, autoplay: card.autoplay
+    })
     controlRef.current = control
     setScrub(control.time())
 
@@ -1371,7 +1395,7 @@ function ShaderCanvas({ file, toolName, args, result, fallback, sessionId }) {
       controlRef.current = null
       control.stop()
     }
-  }, [source, signature, reload])
+  }, [source, signature, reload, card.autoplay])
 
   const closeMenu = refocus => {
     refocusRef.current = refocus
@@ -2034,7 +2058,8 @@ const STATE_FILTERS = [
   ['frames_pruned', 'Frames pruned']
 ]
 
-/** Why an item (a row or a version) does not play on its own, or null when it may (constraint 7). */
+/** Why an item (a row or a version) does not play on its own, or null when it may: only a
+ * server-checked version whose flash verdict is `none` plays by itself. */
 function playGate(item) {
   if (!item || item.autoplay) {
     return null
@@ -2334,6 +2359,32 @@ async function newShader(prompt) {
 }
 
 /** Save share files (`GET /shaders/{id}/share`) into a folder the user picks, else to the clipboard. */
+/**
+ * Write `text` as a new file in a picked folder, never replacing one: `name`, else `name-2`,
+ * `name-3` ... before the extension (two shaders can share a slug, and the user may keep an older
+ * share file there). Returns the name written, or null.
+ */
+async function writeNewFile(folderId, name, text) {
+  const dot = name.indexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const rest = dot > 0 ? name.slice(dot) : ''
+
+  for (let n = 1; n <= 99; n += 1) {
+    const candidate = n === 1 ? name : `${stem}-${n}${rest}`
+    const result = await pluginFiles.writeText(folderId, candidate, text, { exclusive: true })
+
+    if (result && result.ok) {
+      return candidate
+    }
+
+    if (!result || result.error !== 'exists') {
+      return null
+    }
+  }
+
+  return null
+}
+
 async function saveShareFiles(items, scope = 'page') {
   let answers = []
 
@@ -2363,10 +2414,10 @@ async function saveShareFiles(items, scope = 'page') {
       const written = []
 
       for (const answer of answers) {
-        const result = await pluginFiles.writeText(picked.folder.id, answer.filename, JSON.stringify(answer.share, null, 2) + '\n')
+        const name = await writeNewFile(picked.folder.id, answer.filename, JSON.stringify(answer.share, null, 2) + '\n')
 
-        if (result && result.ok) {
-          written.push(answer.filename)
+        if (name) {
+          written.push(name)
         }
       }
 
@@ -2423,11 +2474,7 @@ function goPage(params) {
   const qs = search.toString()
   const path = qs ? `${PAGE_PATH}?${qs}` : PAGE_PATH
 
-  if (sdk.host && typeof sdk.host.navigate === 'function') {
-    sdk.host.navigate(path)
-  } else {
-    window.location.hash = `#${path}`
-  }
+  sdk.host.navigate(path)
 }
 
 function patchPage(query, patch) {
@@ -2463,11 +2510,15 @@ function useLibrary(qs) {
   return sdk.useQuery({
     queryKey: qkey('library', qs),
     queryFn: async ({ queryKey }) => {
-      const cached = client.getQueryData(queryKey)
-      const wanted = (cached && cached.pages) || 1
+      // Pages to replay: re-read on every step, so a Load more that merged a page while this
+      // refetch ran is fetched again here instead of being dropped when the refetch lands.
+      const wanted = () => {
+        const cached = client.getQueryData(queryKey)
+        return (cached && cached.pages) || 1
+      }
       let data = { ...(await apiCall(libraryUrl(qs))), pages: 1 }
 
-      while (data.pages < wanted && data.cursor) {
+      while (data.pages < wanted() && data.cursor) {
         data = mergePage(data, await apiCall(libraryUrl(qs, data.cursor)))
       }
 
@@ -2512,6 +2563,10 @@ function useJob(id) {
 const THUMB_BATCH = 60
 
 const THUMB_CACHE_MAX = 600
+// GET /thumbs calls in flight at once, and how long a key whose batch failed waits before a later
+// render asks for it again.
+const THUMB_PARALLEL = 3
+const THUMB_RETRY_MS = 15000
 
 /** A thumb to fetch: `<id>@v<n>` plus the file's mtime (thumbStamp), which changes when a slider
  * save re-renders it; null when there is nothing to fetch. */
@@ -2542,6 +2597,29 @@ function rowThumbItem(row) {
 const thumbCache = new Map()
 const thumbLoading = new Set()
 const thumbListeners = new Set()
+// Entries whose batch failed (a 502, a timeout on a remote link) -> when. Never cached for the
+// session: shown as "No preview yet" now and asked for again after THUMB_RETRY_MS.
+const thumbFailed = new Map()
+
+/** A thumb as the tile reads it: data URL, null (none, or its batch failed), undefined (loading). */
+function thumbValue(entry) {
+  if (thumbCache.has(entry)) {
+    return thumbCache.get(entry)
+  }
+
+  return thumbFailed.has(entry) ? null : undefined
+}
+
+/** Whether `entry` should be requested: not cached, not in flight, not a fresh failure. */
+function thumbWanted(entry, now = Date.now()) {
+  if (thumbCache.has(entry) || thumbLoading.has(entry)) {
+    return false
+  }
+
+  const failedAt = thumbFailed.get(entry)
+
+  return failedAt === undefined || now - failedAt >= THUMB_RETRY_MS
+}
 
 function keepThumb(entry, value) {
   thumbCache.delete(entry)
@@ -2571,25 +2649,44 @@ function thumbBatches(items, first) {
   return batches
 }
 
+/** Fetch `items` in batches, THUMB_PARALLEL at a time; batches start in thumbBatches order. */
 async function loadThumbs(items, first) {
-  for (const chunk of thumbBatches(items, first)) {
-    let thumbs = {}
-
-    try {
-      const answer = await apiCall(`/thumbs?ids=${chunk.map(item => encodeURIComponent(item.key)).join(',')}`)
-      thumbs = (answer && answer.thumbs) || {}
-    } catch {
-      // A failed batch reads as 'No preview yet'; a later stamp asks again.
+  const batches = thumbBatches(items, first)
+  let next = 0
+  const worker = async () => {
+    while (next < batches.length) {
+      await loadThumbBatch(batches[next++])
     }
+  }
 
-    for (const item of chunk) {
-      thumbLoading.delete(item.entry)
+  await Promise.all(Array.from({ length: Math.min(THUMB_PARALLEL, batches.length) }, worker))
+}
+
+async function loadThumbBatch(chunk) {
+  let thumbs = null
+
+  try {
+    const answer = await apiCall(`/thumbs?ids=${chunk.map(item => encodeURIComponent(item.key)).join(',')}`)
+    thumbs = (answer && answer.thumbs) || {}
+  } catch {
+    thumbs = null
+  }
+
+  const now = Date.now()
+
+  for (const item of chunk) {
+    thumbLoading.delete(item.entry)
+
+    if (thumbs === null) {
+      thumbFailed.set(item.entry, now)
+    } else {
+      thumbFailed.delete(item.entry)
       keepThumb(item.entry, typeof thumbs[item.key] === 'string' ? thumbs[item.key] : null)
     }
+  }
 
-    for (const listener of thumbListeners) {
-      listener()
-    }
+  for (const listener of thumbListeners) {
+    listener()
   }
 }
 
@@ -2610,7 +2707,7 @@ function useThumbs(items, first) {
     }
   }
 
-  const missing = wanted.filter(item => !thumbCache.has(item.entry) && !thumbLoading.has(item.entry))
+  const missing = wanted.filter(item => thumbWanted(item.entry))
   const missingKey = missing.map(item => item.entry).join(',')
 
   useEffect(() => {
@@ -2620,7 +2717,7 @@ function useThumbs(items, first) {
   }, [])
 
   useEffect(() => {
-    const todo = missing.filter(item => !thumbCache.has(item.entry) && !thumbLoading.has(item.entry))
+    const todo = missing.filter(item => thumbWanted(item.entry))
 
     if (todo.length) {
       todo.forEach(item => thumbLoading.add(item.entry))
@@ -2631,7 +2728,7 @@ function useThumbs(items, first) {
   const map = {}
 
   for (const item of wanted) {
-    map[item.key] = thumbCache.get(item.entry)
+    map[item.key] = thumbValue(item.entry)
   }
 
   return map
@@ -4978,7 +5075,7 @@ function ImportPanel({ onClose, onOpenShader }) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The Lab (F40): edit a shader's code beside the chat. Opened with host.openWorkspace docked right
+// The Lab: edit a shader's code beside the chat. Opened with host.openWorkspace docked right
 // or centre (the choice is remembered in ctx.storage 'labDock'); on a Desktop without
 // openWorkspace it is a tab of the Shaders page. Unsaved text lives in ctx.storage 'lab:<id>'
 // ({text, base, savedAt}) until Save makes a new version through the server check, Discard edits
@@ -5809,10 +5906,10 @@ const LAB_CSS = `
 `
 
 // ---------------------------------------------------------------------------------------------
-// Sidebar row and settings page. The row comes from the shared module below, at 52 (D3 of the
-// sidebar-rows plan). The settings page gives the plugin its own entry under Settings, Plugins,
-// titled Shaderbrücke; Hermes then folds the schema form beneath it as "Agent settings" instead of
-// listing a second entry named after the slug (D7).
+// Sidebar row and settings page. The row comes from the shared module below, at 52, just below
+// Kanban. The settings page gives the plugin its own entry under
+// Settings, Plugins, titled Shaderbrücke; Hermes then folds the schema form beneath it as "Agent
+// settings" instead of listing a second entry named after the slug.
 // ---------------------------------------------------------------------------------------------
 
 // sidebar-row v1 begin
@@ -5948,11 +6045,7 @@ const NO_CONNECTION = typeof sdk.atom === 'function' ? sdk.atom(null) : null
 let sidebarRow = null
 
 function openAgentSettings() {
-  if (sdk.host && typeof sdk.host.navigate === 'function') {
-    sdk.host.navigate(AGENT_SETTINGS_PATH)
-  } else {
-    window.location.hash = `#${AGENT_SETTINGS_PATH}`
-  }
+  sdk.host.navigate(AGENT_SETTINGS_PATH)
 }
 
 /** The two-place install line: Desktop loads this file from its own computer, never from the server. */

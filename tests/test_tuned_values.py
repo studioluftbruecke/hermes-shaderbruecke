@@ -48,25 +48,25 @@ def test_effective_values_are_tuned_else_authored():
     assert RECORD.effective_values(legacy)["warmth"] == 0.2
 
 
-def test_set_slider_values_merges_known_finite_clamped_numbers(conn):
+def test_set_slider_values_merges_known_finite_clamped_numbers(conn, tmp_path):
     RECORD.save(conn, sky())
-    updated = RECORD.set_slider_values(conn, "sky", {"sunHeight": 0.41, "nope": 0.5})
+    updated = RECORD.set_slider_values(conn, tmp_path / "data", "sky", {"sunHeight": 0.41, "nope": 0.5})
     assert updated["tuned_values"] == {"sunHeight": 0.41}
     assert updated["edited_by"] == "human"
-    again = RECORD.set_slider_values(conn, "sky", {"warmth": 7.0, "cloudCover": float("nan"),
+    again = RECORD.set_slider_values(conn, tmp_path / "data", "sky", {"warmth": 7.0, "cloudCover": float("nan"),
                                                   "sunHeight": True})
     assert again["tuned_values"] == {"sunHeight": 0.41, "warmth": 1.0}
     assert RECORD.latest(conn, "sky")["tuned_values"] == {"sunHeight": 0.41, "warmth": 1.0}
-    assert RECORD.set_slider_values(conn, "missing", {"warmth": 0.1}) is None
+    assert RECORD.set_slider_values(conn, tmp_path / "data", "missing", {"warmth": 0.1}) is None
 
 
-def test_reset_returns_to_the_authored_defaults(conn):
+def test_reset_returns_to_the_authored_defaults(conn, tmp_path):
     RECORD.save(conn, sky())
-    RECORD.set_slider_values(conn, "sky", {"sunHeight": 0.41})
-    reset = RECORD.reset_tuned_values(conn, "sky")
+    RECORD.set_slider_values(conn, tmp_path / "data", "sky", {"sunHeight": 0.41})
+    reset = RECORD.reset_tuned_values(conn, tmp_path / "data", "sky")
     assert reset["tuned_values"] == {}
     assert RECORD.effective_values(RECORD.latest(conn, "sky"))["sunHeight"] == 0.32
-    assert RECORD.reset_tuned_values(conn, "missing") is None
+    assert RECORD.reset_tuned_values(conn, tmp_path / "data", "missing") is None
 
 
 def all_files(doc):
@@ -107,7 +107,7 @@ def test_library_get_names_tuned_and_effective_values(tmp_path, monkeypatch):
     monkeypatch.setattr(PLUGIN, "_storage", lambda: (sqlite3.connect(db), tmp_path / "data"))
     connection = sqlite3.connect(db)
     RECORD.save(connection, sky())
-    RECORD.set_slider_values(connection, "sky", {"warmth": 0.2})
+    RECORD.set_slider_values(connection, tmp_path / "data", "sky", {"warmth": 0.2})
     connection.close()
     got = json.loads(PLUGIN.shader_library({"action": "get", "id": "sky"}))["shader"]
     assert got["tuned_values"] == {"warmth": 0.2}
@@ -144,7 +144,7 @@ def test_a_new_version_names_the_values_the_human_tuned_on_the_last_one(tmp_path
     first = json.loads(PLUGIN.shader_render({"source": SKY, "name": "golden-hour sky"}))
     assert first["success"] is True and first["tuned_values"] == {}
     connection = sqlite3.connect(db)
-    RECORD.set_slider_values(connection, first["id"], {"sunHeight": 0.41})
+    RECORD.set_slider_values(connection, base, first["id"], {"sunHeight": 0.41})
     connection.close()
     second = json.loads(PLUGIN.shader_render({"source": SKY + "// a second look\n", "id": first["id"]}))
     assert second["success"] is True and second["version"] == 2

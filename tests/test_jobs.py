@@ -1,4 +1,4 @@
-"""Jobs (constraint 10): one live job per kind, a stale job resumes from its first unfinished item,
+"""Background jobs: one live job per kind, a stale job resumes from its first unfinished item,
 an item that fails is recorded and the job goes on."""
 
 import pathlib

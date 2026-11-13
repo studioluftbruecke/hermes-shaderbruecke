@@ -124,7 +124,7 @@ out.png = canvas.toDataURL('image/png');
 return out;
 })()"""
 
-# The M2 bundle: three frames for the contact sheet, a float pass for a NaN verdict, and a
+# The render bundle: three frames for the contact sheet, a float pass for a NaN verdict, and a
 # one-second scan that only returns numbers (the flash verdict is computed in Python).
 # The expression only installs `window.__sbBundle`; Python then calls its steps one by one
 # (compile, frames, flash), so a deadline always knows which phase was running.
@@ -350,8 +350,8 @@ out.flash = { lumas: luma, reds: red, fps: CFG.flash_fps };
 return out;
 },
 
-// The library thumbnail (F36): the t = 1 s frame with the given slider values, drawn into a small
-// 2D canvas and encoded as WebP in this session (P15), so no PNG round trip is needed.
+// The library thumbnail: the t = 1 s frame with the given slider values, drawn into a small
+// 2D canvas and encoded as WebP in this session, so no PNG round trip is needed.
 thumb() {
 const main = state.main;
 setTime(main, CFG.thumb_time);
@@ -409,7 +409,7 @@ class BundleResult:
     frames: list[dict] = field(default_factory=list)   # {t, png_path, luma_mean, luma_std, nan_fraction, moved}
     late: list[dict] = field(default_factory=list)     # {t, moved}: motion-only frames against the first
     contact_sheet: str | None = None
-    thumb: str | None = None                            # thumb.webp path (F36)
+    thumb: str | None = None                            # thumb.webp path
     flash: dict = field(default_factory=dict)
     draw_ms: float | None = None
     wall_ms: int | None = None
@@ -526,21 +526,31 @@ def timeout_detail(phase: str, timeout_s: float) -> str:
     return f"timed out after {timeout_s:g} s in the {phase} phase: {hint}"
 
 
+# The file the Hermes container image writes with its bundled Chromium's path.
+HERMES_CHROMIUM_MARKER = Path("/etc/hermes/chromium-executable-path")
+# Where a Mac installs Chromium or Chrome; neither puts the binary on PATH.
+APP_CHROMIUM_PATHS = (
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    os.path.expanduser("~/Applications/Chromium.app/Contents/MacOS/Chromium"),
+    os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+)
+
+
 def find_chromium() -> str | None:
-    """Hermes' own Chromium: env override, then the path Hermes itself records, then PATH."""
+    """Env override, then the path Hermes itself records, then PATH, then the Mac app folders."""
     explicit = os.environ.get("SHADERBRUECKE_CHROMIUM")
     if explicit and os.access(explicit, os.X_OK):
         return explicit
-    marker = Path("/etc/hermes/chromium-executable-path")
-    if marker.is_file():
-        candidate = marker.read_text(encoding="utf-8").strip()
+    if HERMES_CHROMIUM_MARKER.is_file():
+        candidate = HERMES_CHROMIUM_MARKER.read_text(encoding="utf-8").strip()
         if candidate and os.access(candidate, os.X_OK):
             return candidate
     for name in ("chromium", "chromium-browser", "google-chrome", "chrome"):
         found = shutil.which(name)
         if found:
             return found
-    return None
+    return next((path for path in APP_CHROMIUM_PATHS if os.access(path, os.X_OK)), None)
 
 
 # The only variables Chromium inherits. The gateway's environment holds every profile's API keys
@@ -601,20 +611,47 @@ class _Pipe:
 
     def __init__(self, write_fd: int, read_fd: int, deadline: float):
         self._w, self._r, self._deadline = write_fd, read_fd, deadline
+        # Non-blocking, so a browser that stops reading cannot hold a write past the deadline.
+        os.set_blocking(self._w, False)
         self._buf = b""
         self._next_id = 0
+        self._torn = False
         self.on_event: Callable[[dict], None] | None = None
 
     def send(self, method: str, params: dict | None = None, session: str | None = None) -> int:
         """Write one command without waiting for its reply; returns its id."""
+        self._write(self._message(method, params, session), self._deadline)
+        return self._next_id
+
+    def close_browser(self, budget_s: float = 0.5) -> bool:
+        """Ask the browser to quit, also after the render's deadline has passed (a timed-out
+        render still has to tell its browser to go). True when the whole command was written."""
+        if self._torn:
+            return False                    # a command cut off mid-write would garble this one
+        try:
+            self._write(self._message("Browser.close", None, None), time.monotonic() + budget_s)
+        except (_Deadline, OSError):
+            return False
+        return True
+
+    def _message(self, method: str, params: dict | None, session: str | None) -> bytes:
         self._next_id += 1
         msg = {"id": self._next_id, "method": method, "params": params or {}}
         if session:
             msg["sessionId"] = session
-        data = memoryview(json.dumps(msg).encode() + b"\0")
+        return json.dumps(msg).encode() + b"\0"
+
+    def _write(self, message: bytes, deadline: float) -> None:
+        data = memoryview(message)
         while data:
-            data = data[os.write(self._w, data):]
-        return self._next_id
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([], [self._w], [], left)[1]:
+                self._torn = self._torn or len(data) < len(message)
+                raise _Deadline()
+            try:
+                data = data[os.write(self._w, data):]
+            except BlockingIOError:
+                continue
 
     def call(self, method: str, params: dict | None = None, session: str | None = None) -> dict:
         call_id = self.send(method, params, session)
@@ -666,6 +703,18 @@ def _reap(pid: int, grace_s: float) -> int | None:
         time.sleep(0.05)
 
 
+# Per Chromium binary: does its sandbox start on this host? Learned from the first start in this
+# process. A container that refuses the user namespaces the sandbox needs makes Chromium exit at
+# once; only then does the child run with `--no-sandbox`.
+_SANDBOX_STARTS: dict[str, bool] = {}
+
+
+def sandbox_state() -> str:
+    """`on`, `off` (this host cannot start Chromium's sandbox) or `unknown` (no start yet)."""
+    known = _SANDBOX_STARTS.get(find_chromium() or "")
+    return "unknown" if known is None else ("on" if known else "off")
+
+
 class _Child:
     """One short-lived Chromium child: spawn, talk CDP over the pipe, always kill the group."""
 
@@ -680,6 +729,7 @@ class _Child:
         self.started = time.monotonic()
         self.phase = "start"
         self.slot_wait_ms = 0
+        self.sandbox = True
         self._slot: contextlib.ExitStack | None = None
 
     def __enter__(self) -> "_Child":
@@ -689,13 +739,29 @@ class _Child:
         # Raises _Busy when every slot stays taken; the deadline starts once a slot is ours.
         self.slot_wait_ms = self._slot.enter_context(_slot())
         try:
-            return self._spawn()
+            # The sandbox stays on unless this host already showed it cannot start one.
+            return self._spawn(sandbox=_SANDBOX_STARTS.get(self.chrome, True))
         except BaseException:
-            self._slot.close()
-            self._slot = None
+            self._stop()
             raise
 
-    def _spawn(self) -> "_Child":
+    def _first_call(self, method: str, params: dict) -> dict:
+        """The first DevTools call. When a sandboxed start of unknown outcome dies before it
+        answers, start once more without the sandbox, keeping the same deadline. It shows either as
+        a closed pipe or, when the first write comes after the child exited, a broken pipe."""
+        try:
+            result = self.cdp.call(method, params)
+        except (RuntimeError, OSError):
+            if not self.sandbox or self.chrome in _SANDBOX_STARTS:
+                raise
+            deadline = self.started + self.timeout_s
+            self._stop(keep_slot=True)
+            self._spawn(sandbox=False, deadline=deadline)
+            result = self.cdp.call(method, params)
+        _SANDBOX_STARTS[self.chrome] = self.sandbox
+        return result
+
+    def _spawn(self, *, sandbox: bool, deadline: float | None = None) -> "_Child":
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.profile = tempfile.mkdtemp(prefix="shaderbruecke-chrome-", dir=short_temp_base())
         cmd_r, cmd_w = (_high_fd(fd) for fd in os.pipe())
@@ -704,7 +770,8 @@ class _Child:
                          os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644)
         argv = [
             self.chrome, "--headless=new", "--remote-debugging-pipe",
-            "--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-swiftshader",
+            *([] if sandbox else ["--no-sandbox"]),
+            "--disable-dev-shm-usage", "--enable-unsafe-swiftshader",
             "--no-first-run", "--no-default-browser-check", "--disable-extensions",
             "--disable-background-networking", "--disable-component-update", "--disable-default-apps",
             "--disable-sync", "--password-store=basic", "--host-resolver-rules=MAP * ~NOTFOUND",
@@ -714,7 +781,9 @@ class _Child:
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             f"--user-data-dir={self.profile}", "about:blank",
         ]
-        self.started = time.monotonic()
+        self.sandbox = sandbox
+        if deadline is None:
+            self.started = time.monotonic()
         self.pid = os.posix_spawn(_LAUNCHER, [_LAUNCHER, "-c", _LAUNCH_SCRIPT, *argv],
                                   child_env(self.profile), setpgroup=0,
                                   file_actions=[
@@ -743,7 +812,7 @@ class _Child:
         """
         if self.cdp is None:
             raise RuntimeError("the browser child was not started")
-        target = self.cdp.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        target = self._first_call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = self.cdp.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         if serve is not None:
             self.cdp.on_event = _page_server_handler(self.cdp, session, serve)
@@ -781,16 +850,19 @@ class _Child:
         return evaluated.get("result", {}).get("value") or {"status": "browser_error"}
 
     def __exit__(self, *exc_info) -> None:
-        try:
-            if self.cdp is not None:
-                self.cdp.call("Browser.close")
-        except Exception:
-            pass
-        exit_code = _reap(self.pid, 2.0) if self.pid else None
-        try:
-            os.killpg(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        self._stop()
+
+    def _stop(self, *, keep_slot: bool = False) -> None:
+        """Close the browser, kill its process group, remove its profile; release the slot unless
+        a second start follows."""
+        closing = self.cdp is not None and self.cdp.close_browser()
+        # A browser told to close gets a moment to quit; one that could not be told is killed now.
+        exit_code = _reap(self.pid, 2.0 if closing else 0.0) if self.pid else None
+        if self.pid:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if exit_code is None and self.pid:
             _reap(self.pid, 5.0)
         for fd in (self._cmd_w, self._res_r):
@@ -801,7 +873,9 @@ class _Child:
                     pass
         if self.profile:
             shutil.rmtree(self.profile, ignore_errors=True)
-        if self._slot is not None:
+        self.cdp, self.pid, self.profile = None, 0, ""
+        self._cmd_w = self._res_r = -1
+        if self._slot is not None and not keep_slot:
             self._slot.close()
             self._slot = None
 
@@ -981,8 +1055,11 @@ def page_server(root: Path):
         parts = urlsplit(url)
         if f"{parts.scheme}://{parts.netloc}" != PAGE_ORIGIN:
             return None
-        path = (root / unquote(parts.path).lstrip("/")).resolve()
-        if not path.is_relative_to(root) or not path.is_file():
+        try:
+            path = (root / unquote(parts.path).lstrip("/")).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                return None
+        except (OSError, ValueError):             # a NUL byte, a name too long for the OS
             return None
         return path.read_bytes(), _PAGE_TYPES.get(path.suffix, "application/octet-stream")
 

@@ -1,4 +1,4 @@
-"""Library thumbnails (F36) and adopting the flat folders of the first builds (D14).
+"""Library thumbnails and adopting the flat folders of the first builds.
 
 Every version gets a 320x180 `thumb.webp` drawn from its t = 1 s frame with the effective slider
 values. A new render writes it in the same browser session (`renderer.render_bundle`). Older
@@ -17,6 +17,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -31,7 +32,7 @@ def version_folder(base: Path, doc: dict) -> Path:
 
 
 def data_url(path: Path | None) -> str | None:
-    """`data:image/webp;base64,...` for a thumb on disk (the route payload; P15/P16: 2 to 20 KB)."""
+    """`data:image/webp;base64,...` for a thumb on disk (the route payload; 2 to 20 KB each)."""
     if path is None:
         return None
     try:
@@ -74,14 +75,16 @@ def make_thumb(conn: sqlite3.Connection, base: Path, shader_id: str, version: in
         if result.status != "ok" or not result.thumb:
             return {"error": result.detail or f"render ended in {result.status}"}
         target = folder / renderer.THUMB_NAME
-        shutil.move(result.thumb, target)
-    with record.shader_lock(base, shader_id):
-        doc = record.get_version(conn, shader_id, version) or doc
-        files = dict(doc.get("files") or {})
-        if files.get("thumb") != str(target):
-            files["thumb"] = str(target)
-            doc["files"] = files
-            record.save(conn, doc)
+        with record.shader_lock(base, shader_id):
+            doc = record.get_version(conn, shader_id, version)
+            if doc is None or not folder.is_dir():
+                return {"error": "the version no longer exists"}
+            shutil.move(result.thumb, target)
+            files = dict(doc.get("files") or {})
+            if files.get("thumb") != str(target):
+                files["thumb"] = str(target)
+                doc["files"] = files
+                record.update(conn, doc)
     return None
 
 
@@ -124,24 +127,52 @@ def start_backfill(conn: sqlite3.Connection, base: Path, conn_factory: Callable[
     return _run(conn, conn_factory, job, ours, handle, background)
 
 
+# Refreshes running in this process, per (data dir, shader, version): the job id, and whether a
+# slider save arrived while it rendered. Such saves join the running job, which renders once more
+# with the latest values instead of every save starting its own job and Chromium child.
+_REFRESHING: dict[tuple[str, str, int], dict] = {}
+_REFRESHING_LOCK = threading.Lock()
+
+
 def start_refresh(conn: sqlite3.Connection, base: Path, conn_factory: Callable[[], sqlite3.Connection],
                   shader_id: str, *, background: bool = True, render=None) -> dict:
     """After slider tuning: re-render the latest version's thumb with the new effective values."""
     newest = record.latest(conn, shader_id)
     if newest is None:
         return {}
-    job = jobs.create(conn, "thumb_refresh", [{"id": shader_id, "version": int(newest["version"])}])
+    key = (str(base), shader_id, int(newest["version"]))
+    with _REFRESHING_LOCK:
+        running = _REFRESHING.get(key)
+        current = jobs.get(conn, running["job"]) if running is not None else None
+        if current is not None and current["state"] in jobs.ACTIVE and not jobs.is_stale(current):
+            running["again"] = True
+            return jobs.public(current) or {}
+        job = jobs.create(conn, "thumb_refresh", [{"id": shader_id, "version": key[2]}])
+        _REFRESHING[key] = {"job": job["id"], "again": False}
 
     def handle(item):
-        with contextlib.closing(conn_factory()) as worker:
-            return make_thumb(worker, base, item["id"], int(item["version"]), render=render)
+        # Another job can take this key over when this one reads as stale (the loop below writes
+        # no heartbeat); from then on only that job's entry counts, and only it removes it.
+        try:
+            with contextlib.closing(conn_factory()) as worker:
+                while True:
+                    outcome = make_thumb(worker, base, item["id"], int(item["version"]), render=render)
+                    with _REFRESHING_LOCK:
+                        mine = _REFRESHING.get(key)
+                        if mine is None or mine["job"] != job["id"] or not mine["again"]:
+                            return outcome
+                        mine["again"] = False
+        finally:
+            with _REFRESHING_LOCK:
+                if (_REFRESHING.get(key) or {}).get("job") == job["id"]:
+                    del _REFRESHING[key]
 
     return _run(conn, conn_factory, job, True, handle, background)
 
 
 def start_adopt(conn: sqlite3.Connection, base: Path, conn_factory: Callable[[], sqlite3.Connection],
                 render_version: Callable[..., dict], *, background: bool = True) -> dict:
-    """Adopt every `ok` flat folder (D14: only on the user's click or command, never on its own);
+    """Adopt every `ok` flat folder (only on the user's click or command, never on its own);
     the result lists the adopted ids, the job's `skipped` the folders that were never adoptable."""
     job, ours = jobs.start_or_resume(conn, "adopt", lambda: adoptable(conn, base))
 

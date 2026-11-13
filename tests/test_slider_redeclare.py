@@ -1,8 +1,8 @@
-"""A `@slider` name declared again by the shader (K-S1, 2026-11-08).
+"""A `@slider` name declared again by the shader.
 
 Every `@slider` line becomes `uniform float <name>;` before the agent's lines, on the host and in
 Desktop. A shader that also declares that name itself (`const float sunHeight = 0.22;`) fails to
-compile with `'sunHeight' : redefinition`. On K-S1 the Desktop card showed that raw log under
+compile with `'sunHeight' : redefinition`. In a hands-on test the Desktop card showed that raw log under
 "It compiled on the Hermes host, so this is a difference between GPUs", which was false: the
 backend that rendered it was an older Shaderbrücke that never injected slider uniforms. The lint
 now names the collision on both halves before any compile, and a local variable that hides a

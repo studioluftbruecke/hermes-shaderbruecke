@@ -185,15 +185,15 @@ def test_an_import_result_carries_name_sliders_and_tuned_values(lib, monkeypatch
 
 def test_tuning_saves_on_the_named_version_and_leaves_the_latest_alone(lib):
     conn, base = lib
-    saved = library_api.set_values(conn, "ember", {"glow": 1.2}, version=1)
+    saved = library_api.set_values(conn, base, "ember", {"glow": 1.2}, version=1)
     assert saved == {"id": "ember", "version": 1, "tuned_values": {"glow": 1.2}}
     assert record.get_version(conn, "ember", 1)["tuned_values"] == {"glow": 1.2}
     assert record.latest(conn, "ember")["tuned_values"] == {}
-    reset = library_api.reset_values(conn, "ember", version=1)
+    reset = library_api.reset_values(conn, base, "ember", version=1)
     assert reset["version"] == 1 and record.get_version(conn, "ember", 1)["tuned_values"] == {}
-    assert library_api.set_values(conn, "ember", {"glow": 1.0}, version=9)["status"] == 404
+    assert library_api.set_values(conn, base, "ember", {"glow": 1.0}, version=9)["status"] == 404
     # Without a version the latest takes it, as the Shaders page has always done.
-    assert library_api.set_values(conn, "ember", {"glow": 1.1})["version"] == 2
+    assert library_api.set_values(conn, base, "ember", {"glow": 1.1})["version"] == 2
 
 
 def test_a_thumb_is_refreshed_only_when_the_latest_version_was_tuned(lib, monkeypatch):

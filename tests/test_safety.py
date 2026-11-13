@@ -51,7 +51,7 @@ def call(handler, args):
     return json.loads(handler(args))
 
 
-# I1.1 -------------------------------------------------------------------------------------------
+# A fresh profile --------------------------------------------------------------------------------
 
 def test_first_calls_on_a_fresh_profile_answer_instead_of_raising(storage):
     rendered = call(PLUGIN.shader_render, {"source": LINT_FAIL, "name": "first"})
@@ -62,7 +62,7 @@ def test_first_calls_on_a_fresh_profile_answer_instead_of_raising(storage):
     assert "no shader" in call(PLUGIN.shader_export, {"id": "sky", "target": "three"})["error"]
 
 
-# I1.2 -------------------------------------------------------------------------------------------
+# Ids that become paths --------------------------------------------------------------------------
 
 BAD_IDS = ["../../escaped", "a/b", "..", "Upper", "-lead", "x" * 81, "a b", "a\nb"]
 
@@ -95,7 +95,7 @@ def test_an_unknown_id_is_an_error_that_names_parent_id(storage):
     assert "parent_id" in result["error"] and "omit id" in result["error"]
 
 
-# I1.3 -------------------------------------------------------------------------------------------
+# Hostile text in generated files ----------------------------------------------------------------
 
 HOSTILE = "sky\nglobalThis.PWNED='name'\r\n// */ ${globalThis.PWNED=1} `\u2028x\x00"
 
@@ -163,7 +163,7 @@ def test_handoff_fences_survive_backticks_in_the_source():
     assert handoff_block(text, "### Fenced.frag.glsl") == files["Fenced.frag.glsl"].rstrip("\n")
 
 
-# I1.4 -------------------------------------------------------------------------------------------
+# Hostile comments in the source -----------------------------------------------------------------
 
 HOSTILE_COMMENTS = [
     "// path C:\\new\\unit and \\u00e9 and \\x41\n",
@@ -216,7 +216,7 @@ def test_fragment_survives_hostile_comments_byte_for_byte(tmp_path):
         assert result == {"equal": True, "same_in_material": True, "pwned": None}, (comment, result)
 
 
-# I1.5 -------------------------------------------------------------------------------------------
+# Copy into dest_dir after the proof -------------------------------------------------------------
 
 def seed(storage, record):
     db, base = storage
@@ -272,7 +272,7 @@ def test_a_bad_dest_dir_is_refused_before_the_proof_runs(storage, fake_proof, tm
     assert fake_proof["calls"] == []
 
 
-# I1.6 -------------------------------------------------------------------------------------------
+# Fork paths -------------------------------------------------------------------------------------
 
 def test_fork_points_every_path_into_its_own_folder(tmp_path):
     conn = sqlite3.connect(tmp_path / "data.db")
@@ -300,7 +300,7 @@ def test_fork_points_every_path_into_its_own_folder(tmp_path):
         assert pathlib.Path(path).is_file(), path
 
 
-# I1.7 -------------------------------------------------------------------------------------------
+# The plugin folder stays clean ------------------------------------------------------------------
 
 def plugin_tree():
     return {str(p.relative_to(ROOT)): p.stat().st_mtime_ns for p in ROOT.rglob("*")

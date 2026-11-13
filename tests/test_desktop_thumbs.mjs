@@ -4,7 +4,7 @@
 //
 // The three imports the Desktop half may use are replaced by small stand-ins, and the module's
 // `loadThumbs` and `thumbItem` are exposed with a recording `rest`. It proves which keys each
-// GET /thumbs carries and in which order; the timing it buys is measured in experiments/.
+// GET /thumbs carries and in which order; test_desktop_thumbs_load.mjs covers the timing.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'

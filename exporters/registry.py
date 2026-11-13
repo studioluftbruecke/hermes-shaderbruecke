@@ -1,7 +1,7 @@
 """Export targets: one registry table every consumer reads.
 
 Each row names its files, the integration steps, the proof method and its status. The
-``shader_export`` schema enum, the Desktop export menu (M7) and the proof runner read this table,
+``shader_export`` schema enum, the Desktop export menu and the proof runner read this table,
 so a new target is one row plus one generator module.
 """
 
@@ -70,7 +70,7 @@ EXPORT_TARGETS: dict[str, ExportTarget] = {
         proof="shadertoy-harness",
         status="stable",
     ),
-    # Both host targets stay experimental until the real-host check (P11): the shims model each
+    # Both host targets stay experimental until they are checked in the real hosts: the shims model each
     # host's wrapper, not its compiler (TouchDesigner's GLSL 4.60 on Vulkan, VDMX's Metal path).
     "td": ExportTarget(
         id="td",

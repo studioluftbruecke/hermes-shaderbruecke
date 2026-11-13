@@ -134,7 +134,7 @@ class DeletingBrowser(FakeBrowser):
     def __call__(self, source, out_dir, **kwargs):
         answer = super().__call__(source, out_dir, **kwargs)
         conn = sqlite3.connect(self.db)
-        record.add_human_notice(conn, self.shader_id, 1)
+        record.add_human_notice(conn, self.base, self.shader_id, 1)
         record.delete(conn, self.base, self.shader_id)
         conn.close()
         return answer

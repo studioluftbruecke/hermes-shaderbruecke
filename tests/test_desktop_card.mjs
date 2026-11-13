@@ -4,8 +4,8 @@
 //
 // The three imports the Desktop half may use (@hermes/plugin-sdk, react, react/jsx-runtime) are
 // replaced by small stand-ins, and the module's own `cardMeta`, `drawsCard` and `sliderValuesPath`
-// are exposed for the test. It proves the plugin's logic, not Desktop's renderer or the canvas;
-// Desktop's own choice of the producing tool call is in experiments/, run against its source.
+// are exposed for the test. It proves the plugin's logic, not Desktop's renderer or the canvas,
+// nor which tool call Desktop picks as the card's producer.
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -111,7 +111,7 @@ check('drawsCard reads the action the way the handler does', () => {
 check('a play result gives the card its id, version, name, sliders and tuned values', () => {
   for (const result of [PLAY, JSON.stringify(PLAY)]) {
     equal(cardMeta('shader_library', { action: 'play', id: 'ember', version: 3 }, result),
-      { id: 'ember', version: 3, name: 'Ember ridges', sliders: SLIDERS, tunedValues: { glow: 1.5 }, argsSource: '' },
+      { id: 'ember', version: 3, name: 'Ember ridges', sliders: SLIDERS, tunedValues: { glow: 1.5 }, argsSource: '', autoplay: false },
       typeof result)
   }
 })
@@ -119,7 +119,7 @@ check('a play result gives the card its id, version, name, sliders and tuned val
 check('an import result never plays the pasted original, only the converted frag', () => {
   for (const result of [IMPORT, JSON.stringify(IMPORT)]) {
     equal(cardMeta('shader_library', { action: 'import', source: '/*{ "ISF": 1 }*/ void main(){}', name: 'x' }, result),
-      { id: 'pasted', version: 1, name: 'Pasted glow', sliders: SLIDERS, tunedValues: {}, argsSource: '' },
+      { id: 'pasted', version: 1, name: 'Pasted glow', sliders: SLIDERS, tunedValues: {}, argsSource: '', autoplay: false },
       typeof result)
   }
 })
@@ -131,7 +131,7 @@ check('a render result keeps the source and name from its arguments', () => {
     { name: 'speed', min: 0, max: 3, default: 1, step: null, label: null }
   ]
   equal(cardMeta('shader_render', { source: SOURCE, name: 'Ember' }, { ...RENDER, sliders: [] }),
-    { id: 'ember', version: 4, name: 'Ember', sliders: parsed, tunedValues: {}, argsSource: SOURCE },
+    { id: 'ember', version: 4, name: 'Ember', sliders: parsed, tunedValues: {}, argsSource: SOURCE, autoplay: false },
     'render')
 })
 

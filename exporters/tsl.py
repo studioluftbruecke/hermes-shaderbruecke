@@ -4,7 +4,7 @@ The transpiler is JavaScript inside the vendored build, so the raw text comes fr
 (`transpileRaw`); every rewrite after it happens here, once, in Python, so the export and the proof
 share one implementation and a unit test can hold it.
 
-The four rewrites (measured in probe P8, `probes/RESULTS.md` §TSL emitter defects):
+The four rewrites, each a defect of the r187 emitter measured on real shaders:
 
 1. `fragCoord` is a vec3 whose z is `screenCoordinate.z`, which is NaN in a node material; a
    Shadertoy Image pass has a vec2, and the vec3/vec2 mismatch poisons every `length()`.

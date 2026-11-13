@@ -138,25 +138,26 @@ def export_now(conn: sqlite3.Connection, base: Path, shader_id: str, target: str
                                       settings=_settings())
 
 
-def set_values(conn: sqlite3.Connection, shader_id: str, values: dict, version: int | None = None) -> dict:
+def set_values(conn: sqlite3.Connection, base: Path, shader_id: str, values: dict,
+               version: int | None = None) -> dict:
     """Store the human's slider values (tuned values) on one version, default the latest; exports
     of that version use them from now on."""
     bad = _bad_id(shader_id)
     if bad:
         return bad
-    document = record.set_slider_values(conn, shader_id, values, version)
+    document = record.set_slider_values(conn, base, shader_id, values, version)
     if document is None:
         return _no_version(shader_id, version)
     return {"id": shader_id, "version": document["version"], "tuned_values": _tuned(document)}
 
 
-def reset_values(conn: sqlite3.Connection, shader_id: str, version: int | None = None) -> dict:
+def reset_values(conn: sqlite3.Connection, base: Path, shader_id: str, version: int | None = None) -> dict:
     """Back to the authored defaults on one version, default the latest: the tuned values are
     dropped, exports use the defaults."""
     bad = _bad_id(shader_id)
     if bad:
         return bad
-    document = record.reset_tuned_values(conn, shader_id, version)
+    document = record.reset_tuned_values(conn, base, shader_id, version)
     if document is None:
         return _no_version(shader_id, version)
     return {"id": shader_id, "version": document["version"], "tuned_values": _tuned(document)}
@@ -170,7 +171,7 @@ def _no_version(shader_id: str, version: int | None) -> dict:
 def refresh_thumb(conn: sqlite3.Connection, base: Path, conn_factory, shader_id: str,
                   version: int | None = None) -> dict:
     """After a slider change on the latest version (or no version named): its thumb is re-rendered
-    with the new values as a job (constraint 10). The slider request returns at once. The library
+    with the new values as a background job. The slider request returns at once. The library
     shows the latest version's thumb, so tuning an older version refreshes nothing."""
     newest = None if _bad_id(shader_id) else record.latest(conn, shader_id)
     if newest is None or (version is not None and int(version) != int(newest["version"])):
@@ -178,9 +179,9 @@ def refresh_thumb(conn: sqlite3.Connection, base: Path, conn_factory, shader_id:
     return thumbs.start_refresh(conn, base, conn_factory, shader_id)
 
 
-# ---------------------------------------------------------------- v0.2 library routes (LB2)
+# ---------------------------------------------------------------- library routes
 #
-# Shapes: experiments/shaderbruecke/v02-contract.md. A refused action is a dict with `error` (a
+# Answers use camelCase keys, as Desktop reads them. A refused action is a dict with `error` (a
 # code), `message` and `status`; plugin_api turns it into `{"detail": {...}}` with that status.
 
 def _refuse(status: int, error: str, message: str, **extra) -> dict:
@@ -272,8 +273,8 @@ def library_page(conn: sqlite3.Connection, base: Path, params: dict) -> dict:
     window, total, cursor = library.page(rows_all, query)
     pick = library.pick_up(rows_all)
     from .. import jobs
-    # P16's no-go branch (LB2 measured 644 ms p50 for 28 rows with inline thumbs through the
-    # plugin host): rows carry no image; Desktop fetches them in one batched GET /thumbs.
+    # Rows carry no image: inline thumbs made a page of 28 rows take 644 ms (median) through the
+    # plugin host, so Desktop fetches them in batched GET /thumbs calls instead.
     return {"rows": window, "total": total, "cursor": cursor,
             "adoptable": len(thumbs.adoptable(conn, base)),
             "pickUp": pick,
@@ -385,7 +386,8 @@ def compare_versions(conn: sqlite3.Connection, shader_id: str, a: int, b: int) -
 
 
 def patch_meta(conn: sqlite3.Connection, base: Path, shader_id: str, body: dict) -> dict:
-    """`PATCH /shaders/{id}`: name, tags, starred, description and licence (constraint 8)."""
+    """`PATCH /shaders/{id}`: name, tags, starred, description and licence (the
+    licence rules in `library.licence_change_refusal`)."""
     bad = _check_id(shader_id)
     if bad:
         return bad
@@ -421,7 +423,8 @@ def patch_meta(conn: sqlite3.Connection, base: Path, shader_id: str, body: dict)
         if refusal:
             allowed = [o["id"] for o in library.licence_options(record.get_meta(conn, shader_id)) if o["allowed"]]
             return _refuse(409, "licence_refused", refusal, allowed=allowed)
-        record.set_licence(conn, shader_id, licence)
+        if record.set_licence(conn, base, shader_id, licence) is None:
+            return _refuse(404, "not_found", f"no shader {shader_id}")
     if changes:
         record.update_meta(conn, shader_id, **changes)
     detail = shader_detail(conn, base, shader_id)
@@ -439,7 +442,7 @@ def set_archived(conn: sqlite3.Connection, base: Path, shader_id: str, archived:
 
 
 def delete_shader(conn: sqlite3.Connection, base: Path, shader_id: str, confirm) -> dict:
-    """Delete forever, archived or not, with the name typed. The agent has no delete (D17)."""
+    """Delete forever, archived or not, with the name typed. The agent has no delete: only a person deletes."""
     bad = _check_id(shader_id)
     if bad:
         return bad
@@ -541,7 +544,7 @@ def _job_view(conn, base: Path, job: dict) -> dict:
     return job
 
 
-# ---------------------------------------------------------------- v0.2 share files and import (LB5)
+# ---------------------------------------------------------------- share files and import
 
 def share(conn: sqlite3.Connection, base: Path, shader_id: str, version: int | None = None) -> dict:
     """`GET /shaders/{id}/share`: `{filename, share}`; Desktop writes it with `ctx.files`."""
@@ -568,7 +571,7 @@ def import_from(conn: sqlite3.Connection, base: Path, body: dict) -> dict:
             "dialect": answer["dialect"]}
 
 
-# ---------------------------------------------------------------- v0.2 Lab save (LB6)
+# ---------------------------------------------------------------- Lab save
 
 def save_version(conn: sqlite3.Connection, base: Path, shader_id: str, body: dict) -> dict:
     """`POST /shaders/{id}/versions`: `{ok: true, version, row}`, the inline failure, or

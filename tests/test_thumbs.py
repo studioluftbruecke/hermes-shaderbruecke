@@ -1,4 +1,4 @@
-"""Thumbnails (F36), meta and licence stamping, forks and adopting flat folders, with a fake
+"""Thumbnails, meta and licence stamping, forks and adopting flat folders, with a fake
 renderer: no browser and no Hermes."""
 
 import json
@@ -111,7 +111,7 @@ def test_backfill_job_fills_every_missing_thumb(lib):
 def test_tuning_refreshes_the_latest_thumb_with_the_new_values(lib):
     conn, base = lib
     save_version(conn, base, "a-glow", 1, thumb=True)
-    record.set_slider_values(conn, "a-glow", {"glow": 0.9})
+    record.set_slider_values(conn, base, "a-glow", {"glow": 0.9})
     fake = FakeRender()
     factory = lambda: sqlite3.connect(base / "data.db")  # noqa: E731
     job = thumbs.start_refresh(conn, base, factory, "a-glow", background=False, render=fake)
@@ -124,7 +124,7 @@ def test_meta_defaults_and_licence_restamping_touch_only_the_latest_version(lib)
     save_version(conn, base, "a-glow", 2, name="glow \u2014 v2")
     meta = record.get_meta(conn, "a-glow")
     assert meta["name"] == "glow \u2014 v2" and meta["licence"] is None and meta["tags"] == []
-    record.set_licence(conn, "a-glow", "MIT")
+    record.set_licence(conn, base, "a-glow", "MIT")
     assert record.get_meta(conn, "a-glow")["licence"] == "MIT"
     assert record.get_version(conn, "a-glow", 2)["provenance"]["licence"] == "MIT"
     assert record.get_version(conn, "a-glow", 1)["provenance"]["licence"] is None

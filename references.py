@@ -1,10 +1,10 @@
-"""`@shader:<id>[@v<n>]`: one shader version as context for the agent's turn (F39).
+"""`@shader:<id>[@v<n>]`: one shader version as context for the agent's turn.
 
 Hermes keeps one provider per prefix for the whole process, and that table is shared by every
 profile the gateway serves. So the provider (`make_shim`) decides per call: it answers only where
 the running profile's config enables Shaderbrücke, and `expand` / `complete` read that profile's
 library (plugin storage follows the active profile). Elsewhere it gives `None` / `[]`, as if the
-prefix did not exist. P17: source and sliders in full, tuned values, one line each for licence,
+prefix did not exist. The text: source and sliders in full, tuned values, one line each for licence,
 lineage and the check; `shader_library get` for the rest.
 
 The provider runs the code of the first Shaderbrücke the process loaded, for every profile.
@@ -87,9 +87,14 @@ def check_line(doc: dict) -> str:
 def expansion(doc: dict, *, latest_version: int, meta: dict | None = None) -> str:
     """The text one `@shader:` reference adds to the turn."""
     name = (meta or {}).get("name") or doc.get("name") or "shader"
+    from .exporters.header import code_fence
     from .record import author_kind
 
     who = author_kind(doc)
+    source = str(doc.get("source") or "").rstrip()
+    # The source can come from a share file or a paste: a fence longer than any backtick run in
+    # it keeps the text inside the block.
+    opening, closing = code_fence(source, "glsl")
     lines = [
         f'Shaderbrücke shader "{name}" (id {doc["id"]}, version {doc["version"]} of {latest_version}, '
         f"written by {'the user' if who == 'human' else 'an import' if who == 'import' else 'the agent'}).",
@@ -99,9 +104,9 @@ def expansion(doc: dict, *, latest_version: int, meta: dict | None = None) -> st
         lineage_line(doc),
         check_line(doc),
         "Source (Shadertoy-style GLSL ES 3.00 body, `mainImage`):",
-        "```glsl",
-        str(doc.get("source") or "").rstrip(),
-        "```",
+        opening,
+        source,
+        closing,
         f"Play it in the chat: shader_library play with id {doc['id']} and version {doc['version']} "
         "(not a new render).",
         "Frames, exports and other versions: shader_library get with this id. A new version: "

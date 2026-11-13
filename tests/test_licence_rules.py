@@ -1,4 +1,4 @@
-"""The licence rules of constraint 8 (`legal` 3.2 and 3.5): any licence while none is inherited;
+"""The licence rules: any licence while none is inherited;
 an inherited NC or SA licence allows only itself or a later version of the same elements."""
 
 import pathlib

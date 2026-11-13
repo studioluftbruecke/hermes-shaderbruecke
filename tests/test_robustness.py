@@ -33,7 +33,7 @@ def fake_browser(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
     return script
 
 
-# I7.1 ------------------------------------------------------------------------------------------
+# Chromium slots --------------------------------------------------------------------------------
 
 def test_a_third_render_waits_for_one_of_two_slots(tmp_path, monkeypatch):
     log = tmp_path / "children.log"
@@ -86,7 +86,7 @@ def test_a_render_that_cannot_get_a_slot_says_busy(tmp_path, monkeypatch):
     assert "2" in result.detail and "at once" in result.detail
 
 
-# I7.2 ------------------------------------------------------------------------------------------
+# Deadlines -------------------------------------------------------------------------------------
 
 def test_a_browser_that_never_answers_times_out_in_the_start_phase(tmp_path, monkeypatch):
     script = fake_browser(tmp_path, "sleep 30")
@@ -110,7 +110,7 @@ def test_a_slow_draw_times_out_in_the_frames_phase(tmp_path):
     assert "loop" in result.detail
 
 
-# I7.3 ------------------------------------------------------------------------------------------
+# Pruning old versions --------------------------------------------------------------------------
 
 def make_versions(base: pathlib.Path, shader_id: str, count: int) -> None:
     for version in range(1, count + 1):
@@ -170,7 +170,7 @@ def test_author_settings_are_one_line_and_the_url_must_be_a_web_link():
     assert SETTINGS.normalise({"author_name": 7})["author_name"] == ""
 
 
-# I7.4 ------------------------------------------------------------------------------------------
+# Library queries -------------------------------------------------------------------------------
 
 def test_list_recent_reads_only_the_latest_row_per_shader(tmp_path):
     conn = sqlite3.connect(tmp_path / "data.db")

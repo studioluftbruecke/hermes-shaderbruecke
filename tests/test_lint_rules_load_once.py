@@ -1,4 +1,4 @@
-"""The lint rules belong to the code that loaded them (live box F25, 2026-11-08).
+"""The lint rules belong to the code that loaded them.
 
 A running gateway keeps the plugin's Python modules until a reload, but `checks.lint` read
 `lint_rules.json` from disk on every call. When the files on disk moved ahead (a checkout update,

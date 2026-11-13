@@ -1,4 +1,4 @@
-"""TouchDesigner GLSL TOP and ISF exports (LB7): file shape without a browser, shim proofs with one.
+"""TouchDesigner GLSL TOP and ISF exports: file shape without a browser, shim proofs with one.
 
 The `chromium` tests render each file in its host shim (`headless/harness.html`) next to the
 source; `scripts/check.sh` skips them on hosts without a browser.

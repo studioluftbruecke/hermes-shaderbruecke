@@ -190,21 +190,21 @@ def test_unknown_ids_targets_and_bad_ids_are_errors(tmp_path, contract):
         assert library_api.targets_for(conn, base, bad)["status"] == 400
         assert library_api.export_text(conn, base, bad, "three")["status"] == 400
         assert library_api.export_now(conn, base, bad, "three")["status"] == 400
-        assert library_api.set_values(conn, bad, {"gain": 1.0})["status"] == 400
-        assert library_api.reset_values(conn, bad)["status"] == 400
+        assert library_api.set_values(conn, base, bad, {"gain": 1.0})["status"] == 400
+        assert library_api.reset_values(conn, base, bad)["status"] == 400
     assert contract.exports.calls == []
 
 
 def test_slider_values_round_trip_and_reset(tmp_path):
     conn, base = make_db(tmp_path)
-    updated = library_api.set_values(conn, "s1", {"gain": 1.7, "bogus": 3.0})
+    updated = library_api.set_values(conn, base, "s1", {"gain": 1.7, "bogus": 3.0})
     assert updated["tuned_values"] == {"gain": 1.7}
     assert RECORD.latest(conn, "s1")["edited_by"] == "human"
     assert library_api.targets_for(conn, base, "s1")["tuned_values"] == {"gain": 1.7}
-    reset = library_api.reset_values(conn, "s1")
+    reset = library_api.reset_values(conn, base, "s1")
     assert reset["tuned_values"] == {}
     assert library_api.targets_for(conn, base, "s1")["effective_values"] == {"gain": 1.0}
-    assert library_api.reset_values(conn, "nope")["status"] == 404
+    assert library_api.reset_values(conn, base, "nope")["status"] == 404
 
 
 def test_router_routes_reach_the_logic(tmp_path, monkeypatch, contract):

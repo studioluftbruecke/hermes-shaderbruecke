@@ -1,9 +1,8 @@
-"""The unattended rule under `plugins.isolation: host` (probe 2026-11-08).
+"""The unattended rule under `plugins.isolation: host`.
 
 In a separate plugin host the session variables and the environment are the host's own, not the
 calling turn's, so `hermes -z`, cron and the API server all looked like a chat with a person and
-`shader_export(dest_dir=...)` would write into a project unattended. Coolify Cockpit hit the same
-blind spot (its bug B1). The rule now reads what Hermes forwards through `ctx`
+`shader_export(dest_dir=...)` would write into a project unattended. The rule now reads what Hermes forwards through `ctx`
 (`current_cron_execution()`, `session_surface()`) and, inside the host on a CLI surface where a
 one-shot run cannot be told from a chat, refuses (fail closed).
 """

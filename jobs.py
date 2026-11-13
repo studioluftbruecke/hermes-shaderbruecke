@@ -1,4 +1,4 @@
-"""Background jobs (constraint 10): thumb backfill, thumb refresh after tuning, adopt.
+"""Background jobs: thumb backfill, thumb refresh after tuning, adopt.
 
 A job is a row in `data.db` (`jobs`), worked by a thread in the process that started it (the
 plugin host for a Desktop click, the CLI for `hermes shaderbruecke thumbs|adopt`). The thread

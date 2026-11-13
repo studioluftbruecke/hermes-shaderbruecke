@@ -1,7 +1,7 @@
-"""F25 (K-S1, 2026-11-08): the render result must say whether the frames move.
+"""The render result must say whether the frames move.
 
-The K-S1 sky drifts its clouds at 0.08 units/s. Its three frames had the same `luma_mean` and
-`luma_std` to three decimals, so the agent told Konstantin the frames "look identical" and
+A test sky drifts its clouds at 0.08 units/s. Its three frames had the same `luma_mean` and
+`luma_std` to three decimals, so the agent told the user the frames "look identical" and
 suspected the renderer of not advancing time. Measured on those PNGs, 17.6% of pixels change from
 t = 0 to 1 s. The result now carries, per frame, the share of pixels that changed against the
 previous frame, and `checks.motion` turns that into `moving` or `still`.

@@ -3,7 +3,7 @@
 The transpiler's encoder copies what it reads into a JavaScript module without escaping, and its
 preprocessor differs from GLSL's: it does not define `GL_ES`, and it expands a function-like macro
 only when the call sits on one line. Each difference lets text the GLSL compiler skipped or dropped
-reach the module as JavaScript (`experiments/shaderbruecke/probes/tsl_smuggle_probe.py`).
+reach the module as JavaScript (each case is a test in `tests/test_exporters.py`).
 
 So the transpiler reads no comments and no directives at all: `prepare` splices line continuations
 and removes comments as GLSL ES 3.00 does, refuses any character GLSL code cannot hold, and expands

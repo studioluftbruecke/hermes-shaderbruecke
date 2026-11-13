@@ -1,8 +1,8 @@
-"""F27: the `id` a failed render returns can be continued (full test, 2026-11-08).
+"""The `id` a failed render returns can be continued.
 
 A failed render (lint or compile error) answers with an `id`, and agents pass it straight back as
 `shader_render(id=...)`. That call was refused ("no shader with id ..."), because failed attempts
-never become a version: DeepSeek lost a call after each of its two compile errors. An id the plugin
+never become a version: a model lost a call after each of its two compile errors. An id the plugin
 minted for a failed attempt now continues as that shader's version 1, with the lineage the failed
 attempt had. An id nobody minted is still refused.
 """

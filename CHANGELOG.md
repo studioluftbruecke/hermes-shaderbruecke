@@ -1,8 +1,43 @@
 # Changelog
 
+## 0.2.5
+
+A review round on security and correctness before the catalog's next review. Update both halves: the plugin where Hermes runs and the one Hermes Desktop loads.
+
+- Writes into a project folder (`shader_export` and `shader_library share` with `dest_dir`) refuse a
+  symlink at the target and never write through one.
+- A share file or a pasted ISF shader with a number that is not finite (1e400, NaN, a 400-digit
+  integer) is refused before anything is stored.
+- Saving slider values, resetting them or changing the licence while the shader is deleted no
+  longer brings it back, and a licence change racing a new version stamps that version.
+- Slider names that are JavaScript reserved words (`new`, `delete`, `function` ...) are ignored like
+  GLSL keywords, so the R3F and TSL exports always parse; the R3F proof no longer claims the
+  `.tsx` wrapper was rendered.
+- Chromium keeps its sandbox wherever it can start one; only a host that refuses it (a container
+  without user namespaces) runs with `--no-sandbox`, and a render result that is a new version
+  says which (`browser_sandbox`).
+- When Hermes does not say whether a person is present, project-folder writes are refused with a
+  sentence asking you to update the plugin.
+- Tool arguments of the wrong type (a NaN version, a list as a name, an infinite time) are refused
+  with a sentence instead of an error.
+- The proof page server no longer ends a proof on a request path with a NUL byte, and a browser that
+  stops reading cannot hold a render past its deadline.
+- `@shader:` references fence the source so a backtick run inside it cannot end the block.
+- The pre-LLM hook checks one file instead of opening the database before every model call; it
+  reads the database once per process, so a Lab save stored by 0.2.4 is still told to the agent.
+- Slider saves while a thumbnail refresh runs join it instead of starting one Chromium each.
+- Chromium or Google Chrome in a Mac's Applications folder is found without setting a path.
+- Settings have labels, README and manifest describe the same settings, and the README discloses
+  share-file writes, background thumbnail work and Desktop's session calls.
+- The chat card plays by itself only a version whose flash check found nothing.
+- "Share files" never replaces a file in the folder you picked; same-named shaders get `-2`, `-3`.
+- The Shaders page asks for thumbnail batches three at a time and asks again for a batch that failed.
+- "Load more" during a refresh no longer loses the loaded page.
+- Delete (or Backspace) on a focused slider resets that slider.
+
 ## 0.2.4
 
-Feedback round of 2026-11-12.
+Clearer action buttons on the shader view and the chat card, and the thumbnails on screen load first.
 
 - Every action button on the shader view, its Export menu, the selection bar and the chat card has
   a role, drawn with Desktop's theme colours so light and dark both work. Edit in Lab is filled in

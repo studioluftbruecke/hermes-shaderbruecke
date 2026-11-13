@@ -1,7 +1,7 @@
-"""The library's pure logic (F35, F37): rows and states, filters, sort and paging, version
-summaries, compare, and the licence rules (constraint 8).
+"""The library's pure logic: rows and states, filters, sort and paging, version summaries,
+compare, and the licence rules.
 
-Everything takes records and meta dicts and returns the shapes of `experiments/.../v02-contract.md`
+Everything takes records and meta dicts and returns the shapes the library routes answer
 (camelCase keys, because Desktop reads them as they are). No database, no Hermes, no files except
 the thumbnails a caller passes in as data URLs.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import re
 
@@ -53,7 +54,7 @@ def states(doc: dict, *, has_thumb: bool) -> list[str]:
 
 
 def autoplay(doc: dict) -> bool:
-    """Constraint 7: only a server-checked version with flash verdict `none` plays by itself."""
+    """The autoplay rule: only a server-checked version with flash verdict `none` plays by itself."""
     return (doc.get("checks") or {}).get("status") == "ok" and flash_verdict(doc) == "none"
 
 
@@ -259,7 +260,7 @@ def compare(a: dict, b: dict) -> dict:
     return {"lines": lines, "sliders": sliders}
 
 
-# ---------------------------------------------------------------- licences (constraint 8)
+# ---------------------------------------------------------------- licences
 
 LICENCES = (
     (None, "Private", "Only you have it. Nobody else may use it; this is the default."),
@@ -334,7 +335,7 @@ def licence_options(meta: dict) -> list[dict]:
     return rows
 
 
-# ---------------------------------------------------------------- share files (F41, format shaderbruecke/1)
+# ---------------------------------------------------------------- share files (format shaderbruecke/1)
 
 SHARE_FORMAT = "shaderbruecke/1"
 SHARE_SUFFIX = ".shaderbruecke.json"
@@ -437,12 +438,16 @@ def parse_share(data) -> tuple[dict | None, str | None]:
         if isinstance(claimed, str) and no_derivatives(claimed):
             return None, ND_REFUSAL.format(licence=claimed)
     tuned = data.get("tuned_values") if isinstance(data.get("tuned_values"), dict) else {}
+    tuned = {str(k): v for k, v in tuned.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    for key, value in tuned.items():
+        if record.finite(value) is None:
+            return None, f"the tuned value {key[:40]!r} is not a finite number"
     tags = clean_tags(data.get("tags") or [])
     author = data.get("author") if isinstance(data.get("author"), dict) else {}
     return {
         "name": clean_name(data.get("name")) or "imported shader",
         "source": source,
-        "tuned_values": {str(k): v for k, v in tuned.items() if isinstance(v, (int, float)) and not isinstance(v, bool)},
+        "tuned_values": tuned,
         "licence": licence,
         "licence_inherited": data.get("licence_inherited") if known(data.get("licence_inherited")) else None,
         "author": _claim_text(author.get("name")),
@@ -481,25 +486,36 @@ def _main_to_main_image(body: str) -> str:
     return re.sub(r"\bgl_FragCoord\b", "vec4(fragCoord, 0.5, 1.0)", body)
 
 
+def _number(value) -> float:
+    """An ISF number as a finite float; `ValueError` for NaN, an infinity or 1e400."""
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError("not a finite number") from exc
+    if not math.isfinite(number):
+        raise ValueError("not a finite number")
+    return number
+
+
 def _isf_input(name: str, kind, item: dict) -> tuple[str | None, str | None]:
     """One ISF input as a `@slider` line or a constant, and the warning for a constant."""
     if kind == "float":
-        low, high = float(item.get("MIN", 0.0)), float(item.get("MAX", 1.0))
-        default = min(high, max(low, float(item.get("DEFAULT", low))))
+        low, high = _number(item.get("MIN", 0.0)), _number(item.get("MAX", 1.0))
+        default = min(high, max(low, _number(item.get("DEFAULT", low))))
         label = " ".join(str(item.get("LABEL") or "").split()).replace('"', "")[:60]
         return f"// @slider {name} {low:g}..{high:g} = {default:g}" + (f' "{label}"' if label else ""), None
     if kind == "bool":
         return (f"const bool {name} = {'true' if item.get('DEFAULT') else 'false'};",
                 f"the ISF input {name} (bool) became a constant")
     if kind in ("long", "event"):
-        return f"const int {name} = {int(item.get('DEFAULT') or 0)};", f"the ISF input {name} ({kind}) became a constant"
+        return f"const int {name} = {int(_number(item.get('DEFAULT') or 0))};", f"the ISF input {name} ({kind}) became a constant"
     if kind == "color":
         value = list(item.get("DEFAULT") or [1, 1, 1, 1])[:4] + [1.0] * 4
-        return (f"const vec4 {name} = vec4({', '.join(f'{float(v):g}' for v in value[:4])});",
+        return (f"const vec4 {name} = vec4({', '.join(f'{_number(v):g}' for v in value[:4])});",
                 f"the ISF input {name} (color) became a constant")
     if kind == "point2D":
         value = list(item.get("DEFAULT") or [0, 0])[:2] + [0.0, 0.0]
-        return (f"const vec2 {name} = vec2({float(value[0]):g}, {float(value[1]):g});",
+        return (f"const vec2 {name} = vec2({_number(value[0]):g}, {_number(value[1]):g});",
                 f"the ISF input {name} (point2D) became a constant")
     return None, None
 
@@ -527,7 +543,7 @@ def _isf(source: str) -> tuple[str | None, list[str], str | None, dict]:
         try:
             line, warning = _isf_input(name, kind, item)
         except (TypeError, ValueError):
-            return None, [], f"the ISF input {name} has a MIN, MAX or DEFAULT that is not a number", {}
+            return None, [], f"the ISF input {name} has a MIN, MAX or DEFAULT that is not a finite number", {}
         if line:
             lines.append(line)
         if warning:

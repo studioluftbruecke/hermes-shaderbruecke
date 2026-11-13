@@ -41,7 +41,7 @@ Everything the plugin does, one section per feature. Install, settings and discl
 - A header with play and pause (also Space), the shader's name, its version and the time.
 - The live canvas. While paused, a scrub bar sets the time, so you can look at any moment.
 - The sliders, with readable labels, the step's precision, Reset all, and a double-click on a label
-  to reset one slider. "Saved, used in exports" confirms each change; it lands on the version the
+  (or Delete on the focused slider) to reset one slider. "Saved, used in exports" confirms each change; it lands on the version the
   card plays.
 - A proof strip: each target's latest verdict in words (`match`, `differs`, `not proven`,
   `not exported`).

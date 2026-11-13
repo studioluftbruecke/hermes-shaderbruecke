@@ -26,7 +26,7 @@ craft rules; the tools carry the schema.
 4. **Look at the frame.** Call `vision_analyze` on `contact_sheet` (three frames side by side) and
    answer for yourself: is the thing I described actually in the picture? Does it move between the
    frames? Is there banding, clipping or a black corner? A render you have not looked at is not a
-   result. This host does not put tool images into your context (probe P7), so the call is yours
+   result. This host does not put tool images into your context, so the call is yours
    to make.
 5. **Fix and render again** until the checks and your eyes agree. Budget:
    three `shader_render` calls per request, failed ones included, unless the user names another
@@ -56,7 +56,9 @@ Every number a person may want to change becomes a slider annotation:
 // @slider cloudCover 0.0..1.0 = 0.55 step 0.01
 ```
 
-Rules: identifier names only; never a GLSL keyword or an injected uniform; at most 16; ranges must
+Rules: identifier names only; never a GLSL keyword, an injected uniform or a JavaScript reserved
+word (`new`, `delete`, `function`: the R3F and TSL exports could not use it), since such a line is
+ignored and the shader then fails to compile; at most 16; ranges must
 ascend and the default must sit inside them. Sliders become uniforms in every export and sliders in
 Desktop, so the user tunes instead of re-prompting you. An optional quoted label names the slider
 for people: `// @slider sunHeight 0.05..0.95 = 0.32 step 0.01 "Sun height"`.
@@ -174,9 +176,13 @@ never relicense someone else's code.
   with the reason. Nothing is fetched: a URL alone is not an import, ask the user to paste the code.
   A pasted Shadertoy shader without a named licence gets Shadertoy's default, CC BY-NC-SA 3.0, and
   the answer warns about it. Tell the user every warning, the licence one first.
-- `share` writes `<name>.shaderbruecke.json`: source, sliders, tuned values, licence, author,
-  lineage and a thumbnail. Anyone with Shaderbrücke imports it. The claims in a share file are the
-  sender's claims, not checked facts.
+- `share` writes `<name>.shaderbruecke.json` into the plugin's `shares/` folder, and with
+  `dest_dir` (an absolute folder the user named) a copy there; it never replaces a file unless the
+  user asked (`overwrite=true`) and is refused in unattended runs. The file holds source, sliders,
+  tuned values, licence, author, lineage and a thumbnail. Anyone with Shaderbrücke imports it. The
+  claims in a share file are the sender's claims, not checked facts.
+- When the user moves a slider, the plugin redraws that version's thumbnail in the background; you
+  do not need to render again for the library picture to follow.
 
 ## Look and craft
 

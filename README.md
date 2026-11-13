@@ -27,7 +27,7 @@ The full feature guide is [`docs/guide.md`](docs/guide.md).
 | ![The Export menu of a Shaderbrücke card with every target and its proof verdict](docs/screenshot-2.png) | ![The Shaderbrücke page in Hermes Desktop: a grid of shader thumbnails with names, version counts and licence badges](docs/screenshot-3.png) |
 | ![The detail sheet of one shader: a large live canvas, sliders and a filmstrip of its versions](docs/screenshot-4.png) | ![The Lab: shader code with line numbers next to the live canvas](docs/screenshot-5.png) |
 
-## Install
+## Install and update
 
 ```bash
 hermes plugins install https://github.com/studioluftbruecke/hermes-shaderbruecke --enable
@@ -55,8 +55,8 @@ on. When Hermes runs on a server, install the plugin in both places, on the same
   computer starts with the defaults.
 
 **Requirements.** Hermes 0.23.0 or newer and a Chromium. The Hermes container image ships one, and
-the plugin finds it on its own. Elsewhere, put `chromium` on `PATH` or point
-`SHADERBRUECKE_CHROMIUM` at the binary. Without a Chromium every render answers `no_browser`. No
+the plugin finds it on its own, and on a Mac it finds Chromium or Google Chrome in `/Applications`.
+Elsewhere, put `chromium` on `PATH` or point `SHADERBRUECKE_CHROMIUM` at the binary. Without a Chromium every render answers `no_browser`. No
 GPU, no Python dependencies, no npm.
 
 ## First use
@@ -72,11 +72,12 @@ GPU, no Python dependencies, no npm.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `allow_project_writes` | `false` | Allow `shader_export(dest_dir=…)` during unattended runs (cron, webhook, single query). |
+| `allow_project_writes` | `false` | Allow `shader_export(dest_dir=…)` and `shader_library share(dest_dir=…)` during unattended runs (cron, webhook, single query). |
 | `credit_line` | `true` | Append "Made with Shaderbrücke" to export headers. Author and licence lines always stay. |
 | `keep_versions` | `5` | Keep frames and proof images for the newest N versions of each shader. |
 | `author_name` | empty | Your name in export headers and share files. |
-| `author_url` | empty | A web link (http or https) next to your name. |
+| `author_url` | empty | A web link (http:// or https://) next to your name. |
+| `starter_prompt` | `true` | Start a new shader chat from the Shaderbrücke page with one of the example prompts; off starts an empty chat. |
 
 Settings apply to the next call; no reload is needed.
 
@@ -86,8 +87,11 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
 ## Safety and disclosures
 
 - **A Chromium child process.** Each render or proof starts Chromium
-  (`--headless=new --remote-debugging-pipe`) with a throwaway profile, `--no-sandbox` (it runs as
-  the Hermes user in a container), `--enable-unsafe-swiftshader` (software GL: no GPU is required),
+  (`--headless=new --remote-debugging-pipe`) with a throwaway profile and Chromium's own sandbox.
+  Where the sandbox cannot start (a container that refuses user namespaces, a root user), the
+  first start in a process fails at once and the child runs with `--no-sandbox` from then on.
+  A `shader_render` result that is a new version says which (`browser_sandbox`: `on` or `off`).
+  The child also gets `--enable-unsafe-swiftshader` (software GL: no GPU is required)
   and `--host-resolver-rules=MAP * ~NOTFOUND`, so **the network is blocked** (host names and IP
   addresses alike). `--webrtc-ip-handling-policy=disable_non_proxied_udp` closes the UDP path
   WebRTC would otherwise have; a probe sent STUN to an IP literal and nothing arrived. Proofs open
@@ -99,9 +103,10 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   profile. A hard deadline (30 s per render, 90 s per proof) kills the whole process group. At most
   two children run at a time per profile; a third call waits up to 120 s and says so. Shader code
   never leaves the machine.
-- **Vendored three.js r187 (MIT, 4.5 MB).** `headless/vendor/three-r187/` carries the three build
-  files and the transpiler unmodified, used **only server-side** for proofs and the TSL transpile.
-  Nothing is served to a browser. Three files exceed the security scanner's 1 MB per-file limit, so
+- **Vendored three.js r187 (MIT, 4.5 MB).** `headless/vendor/three-r187/` carries the four build
+  files and the transpiler unmodified, used **only server-side** for proofs and the TSL transpile:
+  the plugin serves them over the DevTools pipe to its own headless Chromium child, never to
+  Desktop or any other browser. Three files exceed the security scanner's 1 MB per-file limit, so
   their upstream SHA-256 is listed here:
 
   | File | SHA-256 |
@@ -114,23 +119,39 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
 - **Writes.** Shader records, frames and exports go under `plugin_data_dir()` (the profile's plugin
   data folder). A version with its frames and proof images takes 1 to 3 MB; the frames of all but
   the newest `keep_versions` versions per shader are pruned, and sources, records and export files
-  stay. `shader_export(dest_dir=…)` writes into a project folder only when you pass an absolute,
-  existing directory, never overwrites unless `overwrite=true`, copies only proven files unless
+  stay. `shader_library share` writes its share file to `<data>/shares/` first.
+  `shader_export(dest_dir=…)` and `shader_library share(dest_dir=…)` write into a project folder
+  only when you pass an absolute,
+  existing directory, never overwrites unless `overwrite=true`, never writes through a symlink
+  (an existing one at a target name is refused, and files are created with `O_NOFOLLOW`), copies
+  only proven files unless
   `accept_unproven=true`, and is refused in unattended runs unless you turn `allow_project_writes`
   on. Under `plugins.isolation: host` the plugin cannot tell a one-shot `hermes -z` run from a
   terminal chat, so there it refuses `dest_dir` on the terminal surface too (Desktop still works).
+  When the running Hermes does not say whether a person is present (its finite-turn marker for
+  `chat -q` / `-z` turns, a private module, is missing or fails), `dest_dir` is refused as well,
+  with a sentence asking you to update the plugin.
   Names, authors and other text that enter a generated file are cleaned of line breaks and
   comment terminators, so they cannot add code. The TSL transpiler reads the shader without
   comments and with its `#define` macros already expanded, and only after the GLSL compiler
   accepted that exact text. A quote, a backslash, a non-ASCII character or an `#if` block outside
   comments makes the TSL export refuse instead, so a shader cannot carry JavaScript into the
   `.tsl.js` file.
+- **Background work.** Saving slider values (the card, the page or the Lab) starts a thumbnail
+  refresh for that version in a daemon thread of the process that serves the plugin's API; it
+  renders one frame in a Chromium child after the request has answered, and saves that arrive
+  while it runs join it. The **Make previews** and **Add** buttons on the Shaderbrücke page's notices
+  (and `hermes shaderbruecke thumbs|adopt`) start a job over the whole library the same way, one
+  Chromium child per item and at most two at a time. Jobs are recorded in the plugin database, end
+  with their last item and never start on their own.
 - **No telemetry, no accounts, no network calls.** There are no credentials to configure.
 - **Desktop half.** Draws the `.frag` the tool produced, runs the same lint locally before a local
-  compile, and talks only to the plugin's own API (`/api/plugins/shaderbruecke/…`) to read the
+  compile, and talks to the plugin's own API (`/api/plugins/shaderbruecke/…`) to read the
   library, targets and proofs, save slider values, meta and Lab versions, and run an export or an
-  import. Share files are read and written only in a folder you pick. It never `eval`s
-  shader-adjacent code.
+  import. To start a chat about a shader (Continue in chat, New shader) it asks Desktop to create
+  and title a session (`session.create`, `session.title`) and puts a draft in its composer; it
+  never sends it. Share files from the page are read and written only in a folder you pick. It
+  never `eval`s shader-adjacent code.
 - **A context reference and a hook.** `@shader:` expands only in the profile that has the plugin,
   with that profile's library. A `pre_llm_call` hook adds one line to the agent's next turn after
   you save in the Lab; it adds nothing otherwise.
@@ -147,19 +168,8 @@ delete it.
 
 ## Changes
 
-- **0.2.4:** the action buttons have a role each, in both themes: Edit in Lab is filled in the
-  accent colour, Share file, Fork and the export actions have a tinted fill and an outline, and
-  Archive and Show code have an outline. The Shaders page asks for the thumbnails of the tiles on
-  screen first and the rest of the page after them.
-- **0.2.3:** fixes from the catalog review. The proof page no longer gets `file://` access: it
-  loads from the plugin's own `headless/` folder over the DevTools pipe and can read no other local
-  file. The TSL transpiler reads the shader with comments removed and macros expanded, only after
-  the GLSL compiler accepted that text, and the export refuses a quote, a backslash, a non-ASCII
-  character or an `#if` block outside comments, so an imported shader cannot put JavaScript into
-  the module. A macro call split over two lines now exports correctly. `@shader:` checks the
-  running profile's config through Hermes' own loader and no longer reads plugin-manager
-  internals. A shader that drifts slowly is no longer called still: the motion check also looks
-  at t = 10 and 30 s.
+Releases from 0.2.3 on are in [`CHANGELOG.md`](CHANGELOG.md). Earlier releases:
+
 - **0.2.2:** Shaderbrücke has its own page under Settings → Plugins, so the plugin is listed once,
   under its name. The page shows or hides the sidebar row and sets its position (52, below
   Kanban, kept per Desktop), and opens the agent settings beneath it. Needs Hermes 0.23.0.
@@ -186,6 +196,6 @@ delete it.
 Bugs, ideas and pull requests are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first: it says
 how to run the tests and how a pull request lands.
 
-## Licence
+## License
 
 MIT. Made by Studio Luftbrücke.

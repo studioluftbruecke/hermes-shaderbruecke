@@ -1,7 +1,7 @@
 """The real proof: render the exported material module in the offline three harness and compare.
 
 Marked `chromium`: it needs a browser, so `scripts/check.sh` skips it on hosts without one. The PR
-records which host ran it (Chromium 145 / SwiftShader, 2026-11-08).
+records which host ran it.
 """
 
 import importlib.util

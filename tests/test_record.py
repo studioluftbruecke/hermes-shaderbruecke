@@ -99,6 +99,6 @@ def test_slider_values_merge_only_known_names(tmp_path):
     document["sliders"] = [{"name": "gain", "min": 0.0, "max": 2.0, "default": 1.0, "step": None}]
     document["slider_values"] = {"gain": 1.0}
     RECORD.save(conn, document)
-    updated = RECORD.set_slider_values(conn, "a", {"gain": 1.4, "nope": 3.0})
+    updated = RECORD.set_slider_values(conn, tmp_path / "data", "a", {"gain": 1.4, "nope": 3.0})
     assert updated["slider_values"] == {"gain": 1.4}
     assert updated["edited_by"] == "human"
