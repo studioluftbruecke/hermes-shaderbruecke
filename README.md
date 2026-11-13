@@ -147,6 +147,10 @@ delete it.
 
 ## Changes
 
+- **0.2.4:** the action buttons have a role each, in both themes: Edit in Lab is filled in the
+  accent colour, Share file, Fork and the export actions have a tinted fill and an outline, and
+  Archive and Show code have an outline. The Shaders page asks for the thumbnails of the tiles on
+  screen first and the rest of the page after them.
 - **0.2.3:** fixes from the catalog review. The proof page no longer gets `file://` access: it
   loads from the plugin's own `headless/` folder over the DevTools pipe and can read no other local
   file. The TSL transpiler reads the shader with comments removed and macros expanded, only after

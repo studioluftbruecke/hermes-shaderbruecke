@@ -983,6 +983,11 @@ const CSS = `
 .sb-ghost{border-color:transparent;color:var(--ui-text-secondary)}
 .sb-ghost:hover{color:var(--ui-text-primary)}
 .sb-ghost[aria-expanded=true]{color:var(--ui-text-primary);background:var(--ui-control-hover-background)}
+.sb-primary[aria-expanded=true]{box-shadow:0 0 0 2px var(--ui-chat-surface-background),0 0 0 3px var(--dt-primary-solid,var(--ui-accent))}
+.sb-neutral{background:var(--ui-bg-secondary);border-color:color-mix(in srgb,var(--ui-base) 48%,transparent)}
+.sb-neutral:hover{background:var(--ui-bg-primary)}
+.sb-quiet{border-color:color-mix(in srgb,var(--ui-base) 50%,transparent)}
+.sb-quiet[aria-expanded=true]{background:var(--ui-control-hover-background)}
 .sb-toast{margin-left:auto;display:inline-flex;align-items:center;gap:6px;min-height:28px;font-size:12px;color:var(--ui-text-secondary);max-width:100%}
 .sb-toast .sb-btn{height:24px;padding:0 8px;font-size:12px}
 .sb-toast-text{min-width:0}
@@ -997,7 +1002,7 @@ const CSS = `
 .sb-mname small{font-size:11.5px;font-weight:400}
 .sb-mfile{font:11px/1.4 var(--dt-font-mono);color:var(--ui-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sb-mhint{font-size:11.5px;color:var(--ui-text-secondary)}
-.sb-mact{display:flex;gap:2px;margin-left:auto}
+.sb-mact{display:flex;gap:6px;margin-left:auto}
 .sb-mact .sb-btn{height:26px;padding:0 8px;font-size:12px}
 .sb-code{margin:0 12px 12px;border:1px solid var(--ui-stroke-tertiary);border-radius:8px;max-height:320px;overflow:auto;background:var(--ui-bg-tertiary)}
 .sb-code ol{list-style:none;margin:0;padding:6px 0;font:11.5px/1.6 var(--dt-font-mono);counter-reset:sb-line}
@@ -1171,10 +1176,10 @@ function ExportMenu({ targets, busy, onCopy, onSend, onExport }) {
             className: 'sb-mact',
             children: ready
               ? [
-                  jsx('button', { key: 'copy', type: 'button', className: 'sb-btn sb-ghost', 'aria-label': `Copy ${name} file`, onClick: () => onCopy(row), children: 'Copy file' }),
-                  jsx('button', { key: 'send', type: 'button', className: 'sb-btn sb-ghost', 'aria-label': `Send ${name} to chat`, onClick: () => onSend(row), children: 'Send to chat' })
+                  jsx('button', { key: 'copy', type: 'button', className: 'sb-btn sb-neutral', 'aria-label': `Copy ${name} file`, onClick: () => onCopy(row), children: 'Copy file' }),
+                  jsx('button', { key: 'send', type: 'button', className: 'sb-btn sb-neutral', 'aria-label': `Send ${name} to chat`, onClick: () => onSend(row), children: 'Send to chat' })
                 ]
-              : jsx('button', { type: 'button', className: 'sb-btn sb-ghost', disabled: Boolean(busy), 'aria-label': `Export ${name} now`, onClick: () => onExport(row),
+              : jsx('button', { type: 'button', className: 'sb-btn sb-neutral', disabled: Boolean(busy), 'aria-label': `Export ${name} now`, onClick: () => onExport(row),
                   children: working ? [icon('loading', 'codicon-modifier-spin'), ' Exporting'] : 'Export now' })
           })
         ]
@@ -1714,7 +1719,7 @@ function ShaderCanvas({ file, toolName, args, result, fallback, sessionId }) {
           }),
           jsx('button', {
             type: 'button',
-            className: 'sb-btn sb-ghost',
+            className: 'sb-btn sb-quiet',
             'aria-expanded': codeOpen ? 'true' : 'false',
             onClick: () => setCodeOpen(open => !open),
             children: [icon('code'), codeOpen ? 'Hide code' : 'Show code']
@@ -1728,7 +1733,7 @@ function ShaderCanvas({ file, toolName, args, result, fallback, sessionId }) {
         children: [
           jsx('button', {
             type: 'button',
-            className: 'sb-btn sb-ghost',
+            className: 'sb-btn sb-quiet',
             'aria-expanded': codeOpen ? 'true' : 'false',
             onClick: () => setCodeOpen(open => !open),
             children: [icon('code'), codeOpen ? 'Hide code' : 'Show code']
@@ -2511,7 +2516,20 @@ const THUMB_CACHE_MAX = 600
 /** A thumb to fetch: `<id>@v<n>` plus the file's mtime (thumbStamp), which changes when a slider
  * save re-renders it; null when there is nothing to fetch. */
 function thumbItem(id, version, stamp) {
-  return id && version ? { key: `${id}@v${version}`, entry: `${id}@v${version}|${stamp === null || stamp === undefined ? '' : stamp}` } : null
+  return id && version ? { id, key: `${id}@v${version}`, entry: `${id}@v${version}|${stamp === null || stamp === undefined ? '' : stamp}` } : null
+}
+
+/** Whether the tile of shader `id` in `root` is inside the window now. */
+function tileOnScreen(root, id) {
+  const node = root ? root.querySelector(`[data-tile-id="${window.CSS.escape(id)}"]`) : null
+
+  if (!node) {
+    return false
+  }
+
+  const box = node.getBoundingClientRect()
+
+  return box.bottom > 0 && box.top < window.innerHeight
 }
 
 function rowThumbItem(row) {
@@ -2534,9 +2552,27 @@ function keepThumb(entry, value) {
   }
 }
 
-async function loadThumbs(items) {
-  for (let i = 0; i < items.length; i += THUMB_BATCH) {
-    const chunk = items.slice(i, i + THUMB_BATCH)
+/** `items` as request batches: the ones `first` picks (the tiles on screen) in a batch of their
+ * own, then the rest in batches of THUMB_BATCH, so the visible tiles never wait for a page of
+ * images below the fold. */
+function thumbBatches(items, first) {
+  const head = first ? items.filter(first) : []
+  const rest = head.length ? items.filter(item => !head.includes(item)) : items
+  const batches = []
+
+  for (let i = 0; i < head.length; i += THUMB_BATCH) {
+    batches.push(head.slice(i, i + THUMB_BATCH))
+  }
+
+  for (let i = 0; i < rest.length; i += THUMB_BATCH) {
+    batches.push(rest.slice(i, i + THUMB_BATCH))
+  }
+
+  return batches
+}
+
+async function loadThumbs(items, first) {
+  for (const chunk of thumbBatches(items, first)) {
     let thumbs = {}
 
     try {
@@ -2558,10 +2594,11 @@ async function loadThumbs(items) {
 }
 
 /**
- * Thumbs for `items` (thumbItem), fetched in batched GET /thumbs calls of at most 60 keys.
+ * Thumbs for `items` (thumbItem), fetched in batched GET /thumbs calls of at most 60 keys; with
+ * `first` (item -> bool), the items it picks come in a batch before the others.
  * Returns key -> data URL | null (no image) | undefined (loading).
  */
-function useThumbs(items) {
+function useThumbs(items, first) {
   const [, bump] = useReducer(n => n + 1, 0)
   const wanted = []
   const seen = new Set()
@@ -2587,7 +2624,7 @@ function useThumbs(items) {
 
     if (todo.length) {
       todo.forEach(item => thumbLoading.add(item.entry))
-      loadThumbs(todo)
+      loadThumbs(todo, first)
     }
   }, [missingKey])
 
@@ -3164,7 +3201,9 @@ function ShadersPage() {
   const liveId = !openId && !reduced && hovered && hovered.autoplay ? hovered.id : null
   const runningAdopt = adoptJob || ((page && page.jobs) || []).find(job => job.kind === 'adopt' && JOB_ACTIVE.has(job.state))?.id || ''
   const runningThumbs = thumbJob || ((page && page.jobs) || []).find(job => job.kind === 'thumbs' && JOB_ACTIVE.has(job.state))?.id || ''
-  const thumbs = useThumbs((page && page.pickUp ? [...rows, page.pickUp] : rows).map(rowThumbItem))
+  // The tiles on screen and the pick-up banner's image come first.
+  const thumbs = useThumbs((page && page.pickUp ? [...rows, page.pickUp] : rows).map(rowThumbItem),
+    item => Boolean(page && page.pickUp && item.id === page.pickUp.id) || tileOnScreen(gridRef.current, item.id))
   const missingThumbs = rows.filter(row => !row.thumb && !row.thumbVersion).length
 
   const qsRef = useRef(qs)
@@ -3592,8 +3631,8 @@ function ShadersPage() {
           'aria-label': 'Selected shaders',
           children: [
             jsx('span', { className: 'sb-count', 'data-bulk-count': selected.size, children: allSelected && total > 1 ? `All ${selected.size} selected` : `${selected.size} selected` }),
-            jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'bulk-archive', disabled: bulkBusy, onClick: bulkArchive, children: [icon(archived ? 'discard' : 'archive'), archived ? 'Restore' : 'Archive'] }),
-            jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'bulk-share', onClick: () => saveShareFiles([...selected].map(id => ({ id }))), children: [icon('save'), 'Share files'] }),
+            jsx('button', { type: 'button', className: 'sb-btn sb-quiet', 'data-action': 'bulk-archive', disabled: bulkBusy, onClick: bulkArchive, children: [icon(archived ? 'discard' : 'archive'), archived ? 'Restore' : 'Archive'] }),
+            jsx('button', { type: 'button', className: 'sb-btn sb-neutral', 'data-action': 'bulk-share', onClick: () => saveShareFiles([...selected].map(id => ({ id }))), children: [icon('save'), 'Share files'] }),
             jsx('button', { type: 'button', className: 'sb-btn sb-danger-btn', 'data-action': 'bulk-delete', 'aria-expanded': deleting ? 'true' : 'false', disabled: bulkBusy, onClick: () => setDeleting(open => !open), children: [icon('trash'), 'Delete'] })
           ]
         }, 'bar')]
@@ -3921,7 +3960,7 @@ function SheetExport({ id, version, name }) {
     refocusRef,
     trigger: jsx('button', {
       type: 'button',
-      className: 'sb-btn',
+      className: 'sb-btn sb-neutral',
       'aria-controls': menuId,
       'data-action': 'export',
       children: [icon('export'), 'Export', icon('chevron-down')]
@@ -4633,19 +4672,19 @@ function ShaderSheet({ id, query, archived, onClose, onOpenShader }) {
         className: 'sb-sactions',
         children: [
           jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'continue', onClick: () => continueInChat(row, doc.version), children: [icon('comment-discussion'), 'Continue in chat'] }),
-          jsx('button', { type: 'button', className: 'sb-btn', 'data-action': 'fork', disabled: Boolean(pending), onClick: fork, children: [icon('repo-forked'), 'Fork'] }),
+          jsx('button', { type: 'button', className: 'sb-btn sb-neutral', 'data-action': 'fork', disabled: Boolean(pending), onClick: fork, children: [icon('repo-forked'), 'Fork'] }),
           jsx(SheetExport, { id, version: doc.version, name: row.name })
         ]
       }, 'actions'),
       jsxs('div', {
         className: 'sb-sactions2',
         children: [
-          jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'edit-lab', 'aria-expanded': mode === 'lab' ? 'true' : 'false', onClick: () => setMode(mode === 'lab' ? '' : 'lab'), children: [icon('beaker'), 'Edit in Lab'] }),
-          jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': 'share', onClick: () => saveShareFiles([{ id, version: doc.version }]), children: [icon('save'), 'Share file'] }),
-          jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'data-action': row.archived ? 'unarchive' : 'archive', disabled: Boolean(pending), onClick: () => archive(false), children: [icon(row.archived ? 'discard' : 'archive'), row.archived ? 'Unarchive' : 'Archive'] }),
+          jsx('button', { type: 'button', className: 'sb-btn sb-primary', 'data-action': 'edit-lab', 'aria-expanded': mode === 'lab' ? 'true' : 'false', onClick: () => setMode(mode === 'lab' ? '' : 'lab'), children: [icon('beaker'), 'Edit in Lab'] }),
+          jsx('button', { type: 'button', className: 'sb-btn sb-neutral', 'data-action': 'share', onClick: () => saveShareFiles([{ id, version: doc.version }]), children: [icon('save'), 'Share file'] }),
+          jsx('button', { type: 'button', className: 'sb-btn sb-quiet', 'data-action': row.archived ? 'unarchive' : 'archive', disabled: Boolean(pending), onClick: () => archive(false), children: [icon(row.archived ? 'discard' : 'archive'), row.archived ? 'Unarchive' : 'Archive'] }),
           jsxs(sdk.DropdownMenu, {
             children: [
-              jsx(sdk.DropdownMenuTrigger, { asChild: true, children: jsx('button', { type: 'button', className: 'sb-btn sb-ghost', 'aria-label': 'More actions', 'data-action': 'more', children: icon('ellipsis') }) }),
+              jsx(sdk.DropdownMenuTrigger, { asChild: true, children: jsx('button', { type: 'button', className: 'sb-btn sb-quiet', 'aria-label': 'More actions', 'data-action': 'more', children: icon('ellipsis') }) }),
               jsxs(sdk.DropdownMenuContent, {
                 align: 'end',
                 // The picked form takes the focus, not the trigger.
@@ -5651,7 +5690,7 @@ button.sb-pchip{border:0;cursor:pointer;font-family:inherit}
 .sb-ptime{font:12px/1 var(--dt-font-mono);font-variant-numeric:tabular-nums;color:var(--ui-text-secondary);min-width:4.6em}
 .sb-problem-flat{margin:8px 0}
 .sb-sactions{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.sb-sactions2{display:flex;flex-wrap:wrap;gap:2px;margin:0 -8px 12px}
+.sb-sactions2{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
 .sb-toaster{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:40;pointer-events:none}
 .sb-toast-box{pointer-events:auto;display:flex;align-items:center;gap:8px;width:max-content;max-width:min(640px,calc(100vw - 64px));padding:6px 6px 6px 12px;border-radius:10px;background:var(--ui-bg-elevated);border:1px solid var(--ui-stroke-secondary);box-shadow:0 8px 24px rgb(0 0 0/.22);font-size:12.5px}
 .sb-toast-box .sb-btn{height:24px;padding:0 8px;font-size:12px}
