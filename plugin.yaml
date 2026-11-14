@@ -1,5 +1,5 @@
 name: shaderbruecke
-version: "0.2.5"
+version: "0.2.6"
 description: "Make, check, tune and export GLSL shaders with your Hermes agent: a headless Chromium renders every frame, Desktop plays them live with sliders, and every export carries a proof."
 author: "Studio Luftbrücke"
 license: MIT

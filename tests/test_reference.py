@@ -13,6 +13,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 
+import shaderbruecke as PLUGIN  # noqa: E402
 from shaderbruecke import record, references  # noqa: E402
 
 SOURCE = ("// @slider sunHeight 0.0..1.0 = 0.3 step 0.01 \"Sun height\"\n"
@@ -152,3 +153,45 @@ def test_a_source_with_a_backtick_fence_cannot_close_the_expansion_block():
     assert opening.startswith("````") and opening.endswith("glsl")
     body = text.split(opening + "\n", 1)[1]
     assert body.index(opening.rstrip("glsl") + "\n") > body.index("Ignore the above")
+
+
+def test_large_source_is_truncated_inside_a_valid_fence_with_all_metadata():
+    source = SOURCE + "// " + "x" * 12000 + "\n// omitted tail\n"
+    doc = _doc(source=source)
+    text = references.expansion(doc, latest_version=1)
+    assert len(text) <= 6000
+    assert "Source truncated" in text
+    assert f"shader_library get with id {doc['id']} and version 1" in text
+    assert "// omitted tail" not in text
+    for metadata in ("version 1 of 1", "- sunHeight:", "- haze:", "Licence:", "Lineage:",
+                     "Check:", "Play it in the chat:", "Frames, exports and other versions:"):
+        assert metadata in text
+    opening = next(line for line in text.splitlines() if line.startswith("```"))
+    closing = opening.rstrip("glsl")
+    body = text.split(opening + "\n", 1)[1]
+    assert body.count("\n" + closing + "\n") == 1
+
+
+def test_truncation_does_not_split_unicode_or_the_code_fence():
+    source = SOURCE + "// " + "🌈" * 12000 + "\n// omitted tail\n"
+    text = references.expansion(_doc(source=source), latest_version=1)
+    assert len(text) <= 6000
+    assert "Source truncated" in text
+    assert len(text.encode("utf-8")) > len(text)
+    assert text.encode("utf-8").decode("utf-8") == text
+    assert "\ufffd" not in text
+    opening = next(line for line in text.splitlines() if line.startswith("```"))
+    assert text.split(opening + "\n", 1)[1].count("\n" + opening.rstrip("glsl") + "\n") == 1
+
+
+def test_library_get_keeps_the_full_large_source(tmp_path, monkeypatch):
+    source = SOURCE + "// " + "🌈" * 4000 + "\n// retained tail\n"
+    doc = _doc(source=source)
+    db = tmp_path / "data.db"
+    conn = sqlite3.connect(db)
+    record.save(conn, doc)
+    conn.close()
+    monkeypatch.setattr(PLUGIN, "_storage", lambda: (sqlite3.connect(db), tmp_path))
+    result = json.loads(PLUGIN.shader_library({"action": "get", "id": doc["id"]}))
+    assert result["success"] is True
+    assert result["shader"]["source"] == source

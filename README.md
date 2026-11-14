@@ -101,8 +101,9 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   locale and a short temp folder from the environment, never the gateway's API keys. It starts
   through a one-line `/bin/sh` launcher that turns core dumps off and runs it inside its throwaway
   profile. A hard deadline (30 s per render, 90 s per proof) kills the whole process group. At most
-  two children run at a time per profile; a third call waits up to 120 s and says so. Shader code
-  never leaves the machine.
+  two children run at a time per profile; a third call waits up to 120 s and says so. One shader gets
+  three browser attempts in 15 minutes, failed compiles included, before `keep_iterating=true` is
+  required. Shader code never leaves the machine.
 - **Vendored three.js r187 (MIT, 4.5 MB).** `headless/vendor/three-r187/` carries the four build
   files and the transpiler unmodified, used **only server-side** for proofs and the TSL transpile:
   the plugin serves them over the DevTools pipe to its own headless Chromium child, never to
@@ -128,8 +129,8 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   `accept_unproven=true`, and is refused in unattended runs unless you turn `allow_project_writes`
   on. Under `plugins.isolation: host` the plugin cannot tell a one-shot `hermes -z` run from a
   terminal chat, so there it refuses `dest_dir` on the terminal surface too (Desktop still works).
-  When the running Hermes does not say whether a person is present (its finite-turn marker for
-  `chat -q` / `-z` turns, a private module, is missing or fails), `dest_dir` is refused as well,
+  When the running Hermes does not say whether a person is present (the private
+  `gateway.session_finite` module is missing or its check fails), `dest_dir` is refused as well,
   with a sentence asking you to update the plugin.
   Names, authors and other text that enter a generated file are cleaned of line breaks and
   comment terminators, so they cannot add code. The TSL transpiler reads the shader without
@@ -153,8 +154,9 @@ In Desktop, Settings → Plugins → Shaderbrücke holds the sidebar row: **Show
   never sends it. Share files from the page are read and written only in a folder you pick. It
   never `eval`s shader-adjacent code.
 - **A context reference and a hook.** `@shader:` expands only in the profile that has the plugin,
-  with that profile's library. A `pre_llm_call` hook adds one line to the agent's next turn after
-  you save in the Lab; it adds nothing otherwise.
+  with that profile's library. The expanded reference is capped at 6,000 characters and points to
+  `shader_library get` for the full source. A `pre_llm_call` hook adds one line to the agent's next
+  turn after you save in the Lab; it adds nothing otherwise.
 
 ## Uninstall
 

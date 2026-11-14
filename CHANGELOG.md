@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6
+
+- The 15-minute render budget counts every browser attempt, including failed compiles and attempts
+  that produced no version. The durable ledger survives reconnects and counts a success once.
+- `@shader:` references are capped at 6,000 characters. Large sources end with a truncation notice
+  and a `shader_library get` route to the full text.
+- The egress suite proves that a raw-IP HTTP fetch is intercepted before it reaches a server.
+
 ## 0.2.5
 
 A review round on security and correctness before the catalog's next review. Update both halves: the plugin where Hermes runs and the one Hermes Desktop loads.

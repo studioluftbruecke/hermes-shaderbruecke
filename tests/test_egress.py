@@ -7,6 +7,7 @@ address. Shaders cannot run JavaScript, so this only matters if an injection
 ever reached the page script, but the README promises the network is blocked.
 """
 
+import http.server
 import pathlib
 import socket
 import sys
@@ -53,3 +54,48 @@ def test_webrtc_sends_no_stun_packet():
             child.evaluate(script, session=session, await_promise=True)
     time.sleep(0.5)
     assert received == [], f"{len(received)} UDP packet(s) left the render child"
+
+
+@pytest.mark.chromium
+def test_raw_ip_http_fetch_is_intercepted_before_the_server(tmp_path, monkeypatch):
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    url = f"http://127.0.0.1:{port}/raw-ip-probe"
+    page = tmp_path / "index.html"
+    page.write_text("<!doctype html><title>egress probe</title>", encoding="utf-8")
+    seen = []
+    serve = RENDERER.page_server(tmp_path)
+
+    def recording_page_server(_root):
+        def record(url):
+            seen.append(url)
+            return serve(url)
+        return record
+
+    monkeypatch.setattr(RENDERER, "page_server", recording_page_server)
+    expression = ("(async () => { try { const response = await fetch(%r);"
+                  " return {status: 'ok', fetch: 'returned', http: response.status};"
+                  " } catch (error) { return {status: 'ok', fetch: 'failed', error: String(error)}; } })()" % url)
+    try:
+        result = RENDERER.run_page(page, expression, timeout_s=30.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["status"] == "ok" and result["fetch"] == "failed", result
+    assert url in seen, "Chromium did not issue the raw-IP request to the Fetch interceptor"
+    assert requests == [], f"raw-IP HTTP request(s) reached the loopback server: {requests}"

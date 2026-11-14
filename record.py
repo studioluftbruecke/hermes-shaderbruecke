@@ -4,8 +4,8 @@ Storage takes a `sqlite3.Connection` and a base `Path` as arguments, never Herme
 test venv cannot import Hermes, and the same functions run against `plugin_db("shaderbruecke")`
 and `plugin_data_dir("shaderbruecke")` in the tool.
 
-Layout: one row per version in table ``shaders(id, version, record)``; files under
-``<base>/shaders/<id>/v<version>/``.
+Layout: one row per version in table ``shaders(id, version, record)`` and one durable row per
+browser attempt in ``render_attempts``; files under ``<base>/shaders/<id>/v<version>/``.
 """
 
 from __future__ import annotations
@@ -167,6 +167,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS shader_meta (id TEXT PRIMARY KEY, meta TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS human_notices (id TEXT, version INTEGER, created_at TEXT, "
                  "delivered_at TEXT, PRIMARY KEY (id, version))")
+    conn.execute("CREATE TABLE IF NOT EXISTS render_attempts (id TEXT, attempt_id TEXT, started_at REAL, "
+                 "version INTEGER, PRIMARY KEY (id, attempt_id))")
+    conn.execute("CREATE INDEX IF NOT EXISTS render_attempts_recent ON render_attempts (id, started_at)")
     conn.commit()
 
 
@@ -248,6 +251,45 @@ def recent_versions(conn: sqlite3.Connection, shader_id: str, *, within_s: float
     cutoff = (time.time() if now is None else now) - within_s
     count = 0
     for doc in history(conn, shader_id):
+        try:
+            made = calendar.timegm(time.strptime(str(doc.get("created_at")), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        count += made >= cutoff
+    return count
+
+
+def start_attempt(conn: sqlite3.Connection, shader_id: str, attempt_id: str,
+                  now: float | None = None) -> None:
+    """Durably reserve one browser attempt before the child starts."""
+    ensure_schema(conn)
+    conn.execute("INSERT INTO render_attempts (id, attempt_id, started_at, version) VALUES (?, ?, ?, NULL)",
+                 (shader_id, attempt_id, time.time() if now is None else now))
+    conn.commit()
+
+
+def finish_attempt(conn: sqlite3.Connection, shader_id: str, attempt_id: str, version: int) -> None:
+    """Link a successful attempt to its version so the budget counts that browser start once."""
+    ensure_schema(conn)
+    conn.execute("UPDATE render_attempts SET version = ? WHERE id = ? AND attempt_id = ?",
+                 (int(version), shader_id, attempt_id))
+    conn.commit()
+
+
+def recent_attempts(conn: sqlite3.Connection, shader_id: str, *, within_s: float,
+                    now: float | None = None) -> int:
+    """Browser attempts in the window, plus versions recorded before the ledger existed."""
+    import calendar
+
+    ensure_schema(conn)
+    cutoff = (time.time() if now is None else now) - within_s
+    rows = conn.execute("SELECT started_at, version FROM render_attempts WHERE id = ? AND started_at >= ?",
+                        (shader_id, cutoff)).fetchall()
+    linked_versions = {int(version) for _started, version in rows if version is not None}
+    count = len(rows)
+    for doc in history(conn, shader_id):
+        if int(doc["version"]) in linked_versions:
+            continue
         try:
             made = calendar.timegm(time.strptime(str(doc.get("created_at")), "%Y-%m-%dT%H:%M:%SZ"))
         except ValueError:
@@ -660,6 +702,7 @@ def delete(conn: sqlite3.Connection, base: Path, shader_id: str) -> None:
         conn.execute("DELETE FROM shaders WHERE id = ?", (shader_id,))
         conn.execute("DELETE FROM shader_meta WHERE id = ?", (shader_id,))
         conn.execute("DELETE FROM human_notices WHERE id = ?", (shader_id,))
+        conn.execute("DELETE FROM render_attempts WHERE id = ?", (shader_id,))
         conn.commit()
         shutil.rmtree(folder, ignore_errors=True)
         shutil.rmtree(_scratch_root(base, shader_id), ignore_errors=True)

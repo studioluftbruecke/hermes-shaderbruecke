@@ -324,19 +324,23 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
     else:
         shader_id = record.new_id(name) if parent_id or not requested_id else requested_id
     previous = record.latest(conn, shader_id) if requested_id and not parent_id else None
-    if previous is not None and not keep_iterating:
-        recent = record.recent_versions(conn, shader_id, within_s=BUDGET_WINDOW_S)
-        if recent >= RENDER_BUDGET:
+    recent = record.recent_attempts(conn, shader_id, within_s=BUDGET_WINDOW_S)
+    if recent >= RENDER_BUDGET and not keep_iterating:
+        refusal = {"success": False, "id": shader_id, "latest_version": (previous or {}).get("version"),
+                   "attempts_last_15_min": recent,
+                   "error": (f"render_budget: {recent} render attempts of this shader in the last 15 minutes; "
+                             "a further one needs keep_iterating=true")}
+        if previous is not None:
+            refusal["next"] = ("Show the latest version now: put the `media` line on its own line in your "
+                               "reply and offer further changes in words. Pass keep_iterating=true only "
+                               "if the user asked for more iterations.")
             frag_path = (previous.get("files") or {}).get("frag")
-            refusal = {"success": False, "id": shader_id, "latest_version": previous.get("version"),
-                       "error": (f"render_budget: {recent} versions of this shader in the last 15 minutes; "
-                                 "a further one needs keep_iterating=true"),
-                       "next": ("Show the latest version now: put the `media` line on its own line in your "
-                                "reply and offer further changes in words. Pass keep_iterating=true only "
-                                "if the user asked for more iterations.")}
             if frag_path:
                 refusal["media"] = f"MEDIA:{frag_path}"
-            return json.dumps(refusal)
+        else:
+            refusal["next"] = ("No version has rendered successfully. The latest failed attempt remains available "
+                               "for inspection. Pass keep_iterating=true only if the user asked for more iterations.")
+        return json.dumps(refusal)
     version = record.next_version(conn, shader_id)
     # Every attempt renders into a scratch folder; only a successful render becomes a version.
     out_dir = record.attempt_dir(base, shader_id)
@@ -365,6 +369,7 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
         return json.dumps(payload)
 
     times = tuple(sorted({0.0, max(0.0, t), 2.5}))
+    record.start_attempt(conn, shader_id, out_dir.name)
     bundle = renderer.render_bundle(source, out_dir, times=times, sliders=sliders)
     flash = checks.flash_verdict(bundle.flash.get("lumas", []), bundle.flash.get("reds", []),
                                  fps=bundle.flash.get("fps", 60.0)) if bundle.flash else \
@@ -424,6 +429,7 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
         if requested_id and not parent_id:
             previous = newest
         version = int((newest or {}).get("version") or 0) + 1
+        record.finish_attempt(conn, shader_id, out_dir.name, version)
         # Promote the attempt to its version folder and point every stored path there.
         final_dir = record.version_dir(base, shader_id, version)
         if final_dir.exists():
@@ -504,10 +510,11 @@ def _render(conn, base, *, source: str, name: str, t: float = 1.0, requested_id:
     if flash.get("verdict") == "warn" and not is_flat:
         payload.setdefault("warning", "flash risk: 3 general flashes per second (WCAG warn threshold)")
     times_text = ", ".join(f"{frame['t']:g}" for frame in bundle.frames)
-    recent = record.recent_versions(conn, shader_id, within_s=BUDGET_WINDOW_S)
-    payload["versions_last_15_min"] = recent
+    recent = record.recent_attempts(conn, shader_id, within_s=BUDGET_WINDOW_S)
+    payload["versions_last_15_min"] = record.recent_versions(conn, shader_id, within_s=BUDGET_WINDOW_S)
+    payload["attempts_last_15_min"] = recent
     if recent >= RENDER_BUDGET and "media" in payload:
-        payload["next"] += (f" Stop here unless the user asked for more iterations: this is version {recent} "
+        payload["next"] += (f" Stop here unless the user asked for more iterations: this is render attempt {recent} "
                             "of this shader in 15 minutes, and a further one is refused without "
                             "keep_iterating=true. Show it now with the media line and offer further "
                             "changes in words.")

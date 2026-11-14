@@ -4,8 +4,8 @@ Hermes keeps one provider per prefix for the whole process, and that table is sh
 profile the gateway serves. So the provider (`make_shim`) decides per call: it answers only where
 the running profile's config enables Shaderbrücke, and `expand` / `complete` read that profile's
 library (plugin storage follows the active profile). Elsewhere it gives `None` / `[]`, as if the
-prefix did not exist. The text: source and sliders in full, tuned values, one line each for licence,
-lineage and the check; `shader_library get` for the rest.
+prefix did not exist. The text: bounded source, all sliders and tuned values, one line each for licence,
+lineage and the check; `shader_library get` for the full source and the rest.
 
 The provider runs the code of the first Shaderbrücke the process loaded, for every profile.
 """
@@ -17,6 +17,7 @@ import re
 PLUGIN = "shaderbruecke"
 PREFIX = "shader"
 DESCRIPTION = "A Shaderbrücke shader version: source, sliders, tuned values, licence, lineage, check"
+MAX_EXPANSION_CHARS = 6000
 _TARGET_RE = re.compile(r"^(?P<id>[a-z0-9][a-z0-9-]{0,79})(?:@v(?P<version>\d{1,6}))?$")
 _QUOTES = "`\"'"
 
@@ -112,7 +113,23 @@ def expansion(doc: dict, *, latest_version: int, meta: dict | None = None) -> st
         "Frames, exports and other versions: shader_library get with this id. A new version: "
         "shader_render with id " + doc["id"] + ", keeping the tuned values as the `@slider` defaults.",
     ]
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) <= MAX_EXPANSION_CHARS:
+        return text
+
+    source_at = len(lines) - 4
+    head = "\n".join(lines[:source_at])
+    notice = (f"Source truncated for context. Full source: shader_library get with id {doc['id']} "
+              f"and version {doc['version']}.")
+    tail = "\n".join([lines[source_at + 1], notice, *lines[source_at + 2:]])
+    available = MAX_EXPANSION_CHARS - len(head) - len(tail) - 2
+    if available >= 0:
+        return "\n".join((head, source[:available], tail))
+
+    # Oversized metadata must not defeat the source budget. Keep the id, a valid empty fence and the full-source route.
+    compact = [f'Shaderbrücke shader id {doc["id"]}, version {doc["version"]} of {latest_version}.',
+               "Source omitted because its metadata alone exceeded the context budget.", "```glsl", "```", notice]
+    return "\n".join(compact)
 
 
 def expand_from(conn, target: str) -> str | None:
